@@ -54,11 +54,11 @@ public class Simulator {
     public Simulator(SessionSettings settings) throws ConfigError, FieldConvertError, JMException {
     	
     	log.info("*************************************************************************************");
-    	log.info("*							 WELCOME TO WIZ FIX SIMULATOR ");  
+    	log.info("*							 WELCOME TO WIZCOM FIX SIMULATOR ");  
     	//log.info("*							 Version ["+settings.getString("WizFixSimlatorVersion")+"]										   *");
-    	log.info("*							 Version [5.1.0]");
+    	log.info("*							 Version [5.6.0]");
     	log.info("*************************************************************************************");
-    	System.out.println("WELCOME TO WIZ FIX SIMULATOR \nVersion 5.1.0");
+    	System.out.println("WELCOME TO WIZCOM FIX SIMULATOR \nVersion 5.6.0");
     	
     	WizFixApplication wizFixApplication = new WizFixApplication(settings);
 		MessageStoreFactory messageStoreFactory = new FileStoreFactory( settings );
