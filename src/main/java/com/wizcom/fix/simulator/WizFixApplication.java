@@ -5,7 +5,6 @@ package com.wizcom.fix.simulator;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
-import java.util.Scanner;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.logging.Level;
@@ -13,10 +12,9 @@ import java.util.logging.Level;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.wizcom.fix.simulator.util.TimedScan;
+import com.mysql.jdbc.Field;
 
 import quickfix.ConfigError;
-import quickfix.DataDictionary;
 import quickfix.DoNotSend;
 import quickfix.FieldConvertError;
 import quickfix.FieldNotFound;
@@ -25,7 +23,6 @@ import quickfix.IncorrectTagValue;
 import quickfix.IntField;
 import quickfix.Message;
 import quickfix.MessageCracker;
-import quickfix.MessageUtils;
 import quickfix.RejectLogon;
 import quickfix.Session;
 import quickfix.SessionID;
@@ -35,13 +32,11 @@ import quickfix.StringField;
 import quickfix.UnsupportedMessageType;
 import quickfix.field.*;
 import quickfix.fix44.Heartbeat;
-import quickfix.fix44.Logon;
-import quickfix.fix44.ResendRequest;
-import quickfix.fix44.SequenceReset;
 import quickfix.fix44.TestRequest;
 import quickfix.fix44.TradeCaptureReport;
 import quickfix.fix44.TradeCaptureReportAck;
 import quickfix.fix44.component.Instrument;
+import quickfix.fix44.component.Parties;
 
 /**
  * @author subhash
@@ -55,13 +50,15 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	
 	private boolean heartBtDelay=false; // HearbeatDelay=True / false
 	private int heartBtDelayTime=15;
+	private int heartBtDelayCount=10;
 	private int heartbeatcount = 0;
 	
 	private boolean responseMsgDelay=false;
 	private int responseMsgDelayTime=15;
 
 	int myOption=0;
-	TimedScan timedScanner = new TimedScan(System.in);
+//	TimedScan timedScanner = new TimedScan(System.in);
+	private boolean traceNotAvailable = false;
 	
 		
 //    private SessionID currentSession;
@@ -80,7 +77,27 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		// alwaysFillLimitOrders = settings.isSetting(ALWAYS_FILL_LIMIT_KEY) &&
 		// settings.getBool(ALWAYS_FILL_LIMIT_KEY);
 		//System.out.println("WizFixSimlatorVersion 5");
-		//log.info("WizFixSimlatorVersion ["+5+"]");
+		//log.info("WizFixSimlatorVersion ["+5+"]");	
+		
+		if(settings.getBool("TraceNotAvailable")){
+			log.info("TraceNotAvailable Task started on " + new Date());
+			TimerTask repeatedTask = new TimerTask() {
+				public void run() {
+					if(traceNotAvailable) {
+						traceNotAvailable=false;
+						log.info("TraceNotAvailable flag set to [false] ");
+					}else {
+						traceNotAvailable=true;
+						log.info("TraceNotAvailable flag set to [true] ");
+					}					
+		        }
+		    };
+		    Timer timer = new Timer("Timer");
+		     
+		    long delay  = 1000L;
+		    long period = 1000L * settings.getInt("TraceNotAvailableIntervel");
+		    timer.scheduleAtFixedRate(repeatedTask, delay, period);	
+		}
 	}
 
 	/**
@@ -97,8 +114,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	public void onLogout(SessionID arg0) {	}
 		
 	public void fromAdmin(Message arg0, SessionID arg1) throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, RejectLogon {
-		log.info("Recieved Admin message from Gateway :: "+arg0.toString());
-		
+		log.info("Recieved Admin message from Gateway :: "+arg0.toString());		
 	}
 	
 	public void toAdmin(Message arg0, SessionID arg1) {
@@ -119,56 +135,64 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 	public void toApp(Message msg, SessionID arg1) throws DoNotSend {
 		log.info("Response message sending :: [ "+msg.toString() +" ]");
+		/**TradeCaptureReport resTrdCapRpt = (TradeCaptureReport) msg;
+		try {
+		quickfix.fix44.TradeCaptureReport.NoSides sidesGroup = new quickfix.fix44.TradeCaptureReport.NoSides();
+		
+		log.info("NoSide :: ["+resTrdCapRpt.getNoSides().getValue()+"]");
+		for(int grpIndex = 1; grpIndex<= resTrdCapRpt.getNoSides().getValue(); grpIndex += 1) {
+			// get 'grpIndex' sidesGroup
+			resTrdCapRpt.getGroup(grpIndex, sidesGroup);
+			
+			log.info("Side Value ["+sidesGroup.getSide().getValue()+"]");
+			
+			// NoPartyIds subgroup
+			quickfix.fix44.TradeCaptureReport.NoSides.NoPartyIDs partyIdsGroup = new quickfix.fix44.TradeCaptureReport.NoSides.NoPartyIDs();
+			
+			log.info("NoPartyIDs :: ["+sidesGroup.getParties().getNoPartyIDs().getValue()+"]");
+			for(int partyIndex =1;  partyIndex <= sidesGroup.getParties().getNoPartyIDs().getValue(); partyIndex +=1 ) {
+				
+				// get 'partyIndex' partyIdsGroup from sidesGroup
+				sidesGroup.getGroup(partyIndex, partyIdsGroup);					
+				log.info("Before :: PartyID ["+partyIdsGroup.getPartyID().getValue()+"]   PartyRole ["+partyIdsGroup.getPartyRole().getValue()+"]");
+				
+				if(17 == partyIdsGroup.getPartyRole().getValue()) {
+				//	sidesGroup.removeGroup(partyIdsGroup);						
+				//	partyIdsGroup.set(new PartyID("JPMS"));						
+					log.info("After :: PartyID ["+partyIdsGroup.getPartyID().getValue()+"]   PartyRole ["+partyIdsGroup.getPartyRole().getValue()+"]");
+					//sidesGroup.addGroup(partyIdsGroup);	
+					break;
+				}					
+			}
+		}
+		}
+		catch(Exception e) {
+			
+		}
+		**/
 	}
 			
 	// TradeReportTransType : 0=new, 1=cancel, 2=Replace, ----------IN
 	public void onMessage(TradeCaptureReport msg, SessionID sessionID) throws FieldNotFound, SessionNotFound, ConfigError, FieldConvertError, InterruptedException {
 		
 		responseMsgDelay = settings.getBool("ResponseMsgDelay"); 
-		int myOption=0;
+		
 		if (responseMsgDelay) {
-			Scanner scanner = new Scanner(System.in);;
+			System.out.println();
 			try {
-				System.out.println("\n\nReferenceNumber : [" + msg.getTradeReportID().getValue() + "] \n" + "Enter number of seconds to hold the response for :: ");
-			
-				//myOption = Integer.parseInt(timedScanner.nextLine(10000));
-				
-				try {
-					myOption=scanner.nextInt();
-				} catch (Exception e) {
-					myOption=0;
-					e.printStackTrace();
-				}
-
-				if (myOption > 0) {
-					System.out.println("Response to TradeReportID[" + msg.getTradeReportID().getValue() + "] will be processed in [" + myOption + "] seconds");
-					log.info("Response to TradeReportID[" + msg.getTradeReportID().getValue() + "] will be processed in [" + myOption + "] seconds");
-					
-					 Thread.sleep(myOption * 1000);
-					/*Timer timer = new Timer();
-					timer.schedule(new TimerTask() {
-	
-						@Override
-						public void run() {
-	
-							try {
-								onMessageHold(msg, sessionID);
-							} catch (Exception exe) {
-								exe.printStackTrace();
-							}
-						}
-					}, myOption * 1000);*/
-	
-				} else {
-					System.out.println("You have not entered valid time. Processing response message \n\n");
-					log.info("You have not entered valid time. Processing response message");
+				int myOption = settings.getInt("ResponseMsgDelayTime");
+				if(myOption > 0 ) {
+					System.out.println("Response processing delay time is :: "+myOption);
+					Thread.sleep(myOption * 1000);
 					onMessageHold(msg, sessionID);
 				}
-			} catch (Exception exe) {
-				myOption = 0;
+			} catch (Exception e) {
+				e.printStackTrace();
+				System.out.println("Invalid enter, response continue....");
+				onMessageHold(msg, sessionID);
 			}
-
-		}else {		
+			
+		}else {
 			onMessageHold(msg, sessionID);
 		}
 	}
@@ -177,7 +201,11 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		
 		//log.info("message rescieved :: "+msg);	
 		//REJECT processing ... send trade with price = 555 .. will send reject for that trades
-		if(555 == msg.getLastPx().getValue()) {
+		if(traceNotAvailable) {
+			processingREJ(msg, sessionID, msg.getHeader().getField(new TargetSubID()).getValue());
+		}else if(555 == msg.getLastPx().getValue()) {
+			processingREJ(msg, sessionID, msg.getHeader().getField(new TargetSubID()).getValue());			
+		}else if(666 == msg.getLastPx().getValue()) {
 			processingREJ(msg, sessionID, msg.getHeader().getField(new TargetSubID()).getValue());			
 		}else {
 			//NEW
@@ -190,7 +218,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 					processingTradeEntry(msg, sessionID, "CAEN");
 				}else if("TS".equalsIgnoreCase( msg.getHeader().getField(new TargetSubID()).getValue())) {
 					processingTradeEntry(msg, sessionID, "TSEN");
-				}	*/
+				}	*/				
+				
 			}//CANCEL 
 			else if (1 == msg.getTradeReportTransType().getValue()) {
 				
@@ -265,10 +294,15 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		//572 -> 571
 		// 571 
 		//resTrdCapRpt.setField(new TradeReportRejectReason(TradeReportRejectReason.INVALID_PARTY_ONFORMATION));
-		resTrdCapRpt.setField(new TradeReportRejectReason(4005));
 		
-		resTrdCapRpt.setField(new Text("!REJ - INVALID PRICE"));
-		
+		if(traceNotAvailable) {
+			resTrdCapRpt.setField(new TradeReportRejectReason(4069));
+			resTrdCapRpt.setField(new Text("!REJ - TRACE TEMPORARILY NOT AVAILABLE"));			
+			log.info("TraceNotAvailable ... REJ processed...");
+		}else {
+			resTrdCapRpt.setField(new TradeReportRejectReason(4005));
+			resTrdCapRpt.setField(new Text("!REJ - INVALID PRICE"));				
+		}
 
 		resTrdCapRpt.reverseRoute(reqTrdCapRpt.getHeader());
 		
@@ -284,8 +318,14 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 		try {
 			resTrdCapRpt = reqTrdCapRpt;
-			resTrdCapRpt.setField(new TradeReportRefID(reqTrdCapRpt.getTradeReportID().getValue())); // TradeReportRefID
-
+			
+			if(999 == reqTrdCapRpt.getLastPx().getValue()) {
+				log.info("*****    752 tag is not building ....");
+				//resTrdCapRpt.setField(new TradeReportRefID()); // TradeReportRefID
+			}else {
+				resTrdCapRpt.setField(new TradeReportRefID(reqTrdCapRpt.getTradeReportID().getValue())); // TradeReportRefID
+			}
+			
 			resTrdCapRpt.setField(new MessageEventSource(securityType+"EN")); // MessageEventSource
 			resTrdCapRpt.setField(new TradeReportID(getTrdRptID())); // TradeReportID
 			resTrdCapRpt.setField(new StringField(22011, getControlDate()));// ControlDate
@@ -304,17 +344,23 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			resTrdCapRpt.setField(new TradeModifier3(TradeModifier3.T));// TradeModifier3
 			
 		//	resTrdCapRpt.setField(new CopyMsgIndicator(false));
-
+			
 			resTrdCapRpt.reverseRoute(reqTrdCapRpt.getHeader());			
 			
 			Session.sendToTarget(resTrdCapRpt, sessionID);
+			
+			if(777 == reqTrdCapRpt.getLastPx().getValue()) {
+				log.info("*****    Processing NEW ALLEGE request....");
+				processingAllege(resTrdCapRpt, sessionID, securityType, "SPAL");				
+			}
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
 		} catch (FieldNotFound ex) {
+			log.error("Error ::",ex);
 			java.util.logging.Logger.getLogger(WizFixApplication.class.getName()).log(Level.SEVERE, null, ex);
 		}
 	}
-	
+		
 	// MODIFICATION
 	private void processingTradeCorrection(TradeCaptureReport reqTrdCapRpt, SessionID sessionID, String securityType) {
 		TradeCaptureReport resTrdCapRpt = new TradeCaptureReport();
@@ -328,7 +374,13 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			String originalTradeID = reqTrdCapRpt.getField(new StringField(1003)).getValue();
 			resTrdCapRpt.setField(new StringField(1126, originalTradeID));// originalTradeID
 			
-			resTrdCapRpt.setField(new TradeReportRefID(reqTrdCapRpt.getTradeReportID().getValue())); // TradeReportRefID
+			//resTrdCapRpt.setField(new TradeReportRefID(reqTrdCapRpt.getTradeReportID().getValue())); // TradeReportRefID
+			if(999 == reqTrdCapRpt.getLastPx().getValue()) {
+				log.info("*****    752 tag is not building ....");
+				//resTrdCapRpt.setField(new TradeReportRefID()); // TradeReportRefID
+			}else {
+				resTrdCapRpt.setField(new TradeReportRefID(reqTrdCapRpt.getTradeReportID().getValue())); // TradeReportRefID
+			}
 
 			resTrdCapRpt.setField(new MessageEventSource(securityType+"CR")); // MessageEventSource
 			resTrdCapRpt.setField(new TradeReportID(getTrdRptID())); // TradeReportID
@@ -351,9 +403,15 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			
+			if(777 == reqTrdCapRpt.getLastPx().getValue()) {
+				log.info("Processing ALLEGE for Trade Correction....");
+				processingAllege(resTrdCapRpt, sessionID, securityType, securityType+"CR");				
+			}
+			
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
 		} catch (FieldNotFound ex) {
+			log.error("Error ::",ex);
 			java.util.logging.Logger.getLogger(WizFixApplication.class.getName()).log(Level.SEVERE, null, ex);
 		}
 	}
@@ -365,7 +423,14 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 		try {
 			resTrdCapRpt = reqTrdCapRpt;
-			resTrdCapRpt.setField(new TradeReportRefID(reqTrdCapRpt.getTradeReportID().getValue())); // TradeReportRefID
+			
+			//resTrdCapRpt.setField(new TradeReportRefID(reqTrdCapRpt.getTradeReportID().getValue())); // TradeReportRefID
+			if(999 == reqTrdCapRpt.getLastPx().getValue()) {
+				log.info("*****    752 tag is not building ....");
+				//resTrdCapRpt.setField(new TradeReportRefID()); // TradeReportRefID
+			}else {
+				resTrdCapRpt.setField(new TradeReportRefID(reqTrdCapRpt.getTradeReportID().getValue())); // TradeReportRefID
+			}
 
 			resTrdCapRpt.setField(new MessageEventSource(securityType+"CX")); // MessageEventSource
 			resTrdCapRpt.setField(new TradeReportID(getTrdRptID())); // TradeReportID
@@ -391,9 +456,11 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			// resTrdCapRpt.getHeader().setField(new
 			// SendingTime(LocalDateTime.now(ZoneOffset.UTC)));
 			Session.sendToTarget(resTrdCapRpt, sessionID);
+						
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
 		} catch (FieldNotFound ex) {
+			log.error("Error ::",ex);
 			java.util.logging.Logger.getLogger(WizFixApplication.class.getName()).log(Level.SEVERE, null, ex);
 		}
 	}
@@ -440,9 +507,73 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
+			log.error("Error ::",sessionNotFound);
 		} catch (FieldNotFound ex) {
+			log.error("Error ::",ex);
 			java.util.logging.Logger.getLogger(WizFixApplication.class.getName()).log(Level.SEVERE, null, ex);
 		}
+	}
+	
+	//Allege
+	private void processingAllege(TradeCaptureReport reqTrdCapRpt, SessionID sessionID, String securityType, String messageEventSource) {
+
+		TradeCaptureReport resTrdCapRpt = new TradeCaptureReport();
+	//	log.info("Processing ALLEGE request....");
+		try {
+			resTrdCapRpt = reqTrdCapRpt;
+			resTrdCapRpt.setField(new TradeReportRefID(reqTrdCapRpt.getTradeReportID().getValue())); // TradeReportRefID
+
+			resTrdCapRpt.setField(new MessageEventSource(messageEventSource)); // MessageEventSource
+			resTrdCapRpt.setField(new TradeReportID(getTrdRptID())); // TradeReportID
+			resTrdCapRpt.setField(new StringField(22011, getControlDate()));// ControlDate
+			resTrdCapRpt.setField(new TradeID(getFinraControlNo(securityType)));// TradeID
+
+			//resTrdCapRpt.setField(new TradeReportTransType(TradeReportTransType.NEW));
+			//resTrdCapRpt.setField(new TradeReportType(TradeReportType.ALLEGED));
+			if(messageEventSource.contains("AL"))
+				resTrdCapRpt.removeField(572);
+			
+			// NoSide group
+			quickfix.fix44.TradeCaptureReport.NoSides sidesGroup = new quickfix.fix44.TradeCaptureReport.NoSides();
+						
+			log.info("NoSide :: ["+resTrdCapRpt.getNoSides().getValue()+"]");
+			for(int grpIndex = 1; grpIndex<= resTrdCapRpt.getNoSides().getValue(); grpIndex += 1) {
+				// get 'grpIndex' sidesGroup
+				resTrdCapRpt.getGroup(grpIndex, sidesGroup);
+								
+				// NoPartyIds subgroup
+				quickfix.fix44.TradeCaptureReport.NoSides.NoPartyIDs partyIdsGroup = new quickfix.fix44.TradeCaptureReport.NoSides.NoPartyIDs();
+				
+				log.debug("NoPartyIDs :: ["+sidesGroup.getParties().getNoPartyIDs().getValue()+"]");
+				for(int partyIndex =1;  partyIndex <= sidesGroup.getParties().getNoPartyIDs().getValue(); partyIndex +=1 ) {
+					
+					// get 'partyIndex' partyIdsGroup from sidesGroup
+					sidesGroup.getGroup(partyIndex, partyIdsGroup);					
+					log.debug("Before :: PartyID ["+partyIdsGroup.getPartyID().getValue()+"]   PartyRole ["+partyIdsGroup.getPartyRole().getValue()+"]");
+					
+					if(17 == partyIdsGroup.getPartyRole().getValue()) {
+						sidesGroup.removeGroup(partyIdsGroup);						
+						partyIdsGroup.set(new PartyID("JPMS"));						
+						sidesGroup.addGroup(partyIdsGroup);	
+						log.debug("After :: PartyID ["+partyIdsGroup.getPartyID().getValue()+"]   PartyRole ["+partyIdsGroup.getPartyRole().getValue()+"]");
+						break;
+					}					
+				}			
+			}
+			
+			//resTrdCapRpt.addGroup(sidesGroup);	
+						
+			//resTrdCapRpt.setField(new CopyMsgIndicator(true));
+
+			Session.sendToTarget(resTrdCapRpt, sessionID);
+			
+		} catch (SessionNotFound sessionNotFound) {
+			sessionNotFound.printStackTrace();
+		} catch (FieldNotFound ex) {
+			log.error("ERROR :: ",ex);
+			java.util.logging.Logger.getLogger(WizFixApplication.class.getName()).log(Level.SEVERE, null, ex);
+		}
+		
 	}
 	
 	public void onMessage(Message msg, SessionID sessionID) {
@@ -478,228 +609,47 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	public void onMessage(Heartbeat msg, SessionID sessionID) throws FieldNotFound {
 
 		try {
-			
 			String senderCompID = msg.getHeader().getField(new SenderCompID()).getValue(); 
-
-			try {
-				//System.out.println("Heartbeat SenderCompID[" + senderCompID + "] :: Checksum [" + msg.getTrailer().getField(new CheckSum()).getValue() + "]\n");
-			
-				log.info("");
-			//	log.info("Heartbeat SenderCompID[" + senderCompID + "] :: Checksum [" + msg.getTrailer().getField(new CheckSum()).getValue() + "] ");
-				
-			
-			} catch (Exception exe) {
-				exe.printStackTrace();
-			} 
+			log.info("");
 			
 			if ( senderCompID.equalsIgnoreCase(sessionID.getSenderCompID())) {
 				heartbeatcount++;
-				heartBtDelay = settings.getBool("HeartBtDelay");
-				
-
-				if (heartBtDelay && heartbeatcount == 2) {
+				try {
+					heartBtDelay = settings.getBool("HeartBtDelay");
+					heartBtDelayCount = settings.getInt("HeartBtDelayCount");
 					
-					log.info("HeartBtDelay [" + heartbeatcount + "]");
+					//System.out.println("HeartBtDelay :: "+heartBtDelay + " \t HeartBtDelayCount :: "+heartBtDelayCount + "Current HeartBtCount :: "+heartbeatcount);
+					log.info("HeartBtDelay :: "+heartBtDelay + " \t HeartBtDelayCount :: "+heartBtDelayCount + "Current HeartBtCount :: "+heartbeatcount);
 					
-					log.info("Heartbeat message from FINRA to Gateway is ::" + msg.toString());
-					heartbeatcount = 0;
-					System.out.println("\"Select Option to Continue :: \n" 
-					+ "1. Delay Heartbeat by 15 secs \n" 
-					+ "2. Send TestRequest\n" 
-					+ "3. Send Logout \n" 
-					+ "4. Send Sequence Reset \n" 
-					+ "5. Send Resend Request \n" 
-					+ "Press any key to Continue .. ");
-
-					try {
-						//timedScanner = new TimedScan();
-						System.out.print("Enter your OPTION in 10 seconds : ");
-						log.info("Enter your OPTION in 10 seconds: ");
-
-						myOption = Integer.parseInt(timedScanner.nextLine(10000));
+					if (heartBtDelay && heartbeatcount == heartBtDelayCount) {
+						if(settings.getInt("HeartBtDelayTime") > 0 ) {
+							//System.out.println("Heart Beat Delay Time is ["+settings.getInt("HeartBtDelayTime")+"]");
+							log.info("Heart Beat Delay Time is ["+ settings.getInt("HeartBtDelayTime") +"]");
+							Thread.sleep(settings.getInt("HeartBtDelayTime") * 1000);
+						}else {
+							//System.out.println("Defalut Heart Beat Delay Time ["+ 15 +"] setting ...");
+							log.info("Defalut Heart Beat Delay Time is ["+ 15 +"] setting ...");
+							Thread.sleep(15 * 1000);
+						}		
 						
-					} catch (Exception exe) {
-						System.out.println("Invalid or no option selected. Processing Heartbeat message \n\n");
-						log.info("Invalid or no option selected. Processing Heartbeat message");
-						myOption = 0;
-					}
-					
-					int currentSeqNo = 0;
-					System.out.println("Selected Option is ["+myOption+"]");					
-					switch (myOption) {
-					
-					case 1:
-						log.info("Selected Option 1 :: waiting 15 sec to send HEARTBEAT.....");
-						Thread.sleep(15000);
-						break;
-
-					case 2:
-						log.info("Selected Option 2 :: sending TestRequest.....");
-						Session.lookupSession(sessionID).generateTestRequest("MY-TEST");
-						break;
-
-					case 3:
-						log.info("Selected Option 3 :: sending logout.....");
-						Session.lookupSession(sessionID).generateLogout();
-						break;
-
-					case 4:
-						log.info("Selected Option 4.");
+						log.info("Heartbeat message from FINRA to Gateway is ::" + msg.toString());
+						heartbeatcount = 0;
 						
-						currentSeqNo = Session.lookupSession(sessionID).getExpectedSenderNum();
-
-						log.info("Current Sequence Number is : " + currentSeqNo);
-						// log.info("Enter SequenceNumber greater than [" + nextSeqNo + "] to continue :");
-/*
-						Scanner	scanner = new Scanner(System.in);
-						int resetSeqNum = 0;
-
-						while(true) {
-							log.info("Enter a Reset SequenceNumber greater than [" + currentSeqNo + "] to continue :");
-							System.out.println("Enter a Reset SequenceNumber greater than [" + currentSeqNo + "] to continue : ");
-							try {
-								resetSeqNum = scanner.nextInt();
-							} catch (Exception exe) {
-								resetSeqNum = 0;								
-							}
-							if (resetSeqNum <= currentSeqNo) {
-								log.info("Reset SequenceNumber should be greater than Current Sequence Number.");			
-								System.out.println("Reset SequenceNumber should be greater than Current Sequence Number.");
-								continue;
-							}else {
-								break;
-							}
-						} 
-						
-						scanner.close();
-					
-						log.info("Generating SequenceReset message with ResetSequenceNumber ["+resetSeqNum+"]...");
-						System.out.println("Generating SequenceReset message with ResetSequenceNumber ["+resetSeqNum+"]...");
-						
-						SequenceReset seqReset = new SequenceReset();
-						seqReset.setString(123, "Y");
-
-						Session.lookupSession(sessionID).setNextSenderMsgSeqNum(resetSeqNum);
-						seqReset.setInt(36, Session.lookupSession(sessionID).getExpectedSenderNum());
-
-						log.info("Sending SequenceReset messgae to Gateway :: " + seqReset.toString());
-						System.out.println("Sending SequenceReset messgae to Gateway :: " + seqReset.toString());
-						
-						Session.sendToTarget(seqReset, sessionID); */	
-						
-						SequenceReset seqReset = new SequenceReset();
-		            	seqReset.setString(123, "Y");
-		            	
-		            	int nextSeqNo = Session.lookupSession(sessionID).getExpectedSenderNum();
-		            	int resetSeqNo = nextSeqNo + 20;
-		            	Session.lookupSession(sessionID).setNextSenderMsgSeqNum(resetSeqNo);
-		            	seqReset.setInt(36, Session.lookupSession(sessionID).getExpectedSenderNum());
-		            	
-		            	log.info(seqReset.toString());
-		            	Session.sendToTarget(seqReset, sessionID);
-						
-						break;
-
-					case 5:
-						log.info("Selected Option 5.");
-					
-						currentSeqNo = Session.lookupSession(sessionID).getExpectedSenderNum();
-						log.info("Current Sequence Number is : " + currentSeqNo);
-					
-						/*scanner = new Scanner(System.in);
-						int beginSeqNum = currentSeqNo;
-						
-						while (beginSeqNum <1 || beginSeqNum >= currentSeqNo) {
-							log.info("Enter a BeginSequenceNumber between [0] and [" + currentSeqNo + "] to continue : ");
-							System.out.println("Enter a BeginSequenceNumber between [0] and [" + currentSeqNo + "] to continue : ");
-							try {
-								beginSeqNum = scanner.nextInt();
-							} catch (Exception exe) {
-								beginSeqNum = currentSeqNo;								
-							}
-							if (beginSeqNum==0 || beginSeqNum >= currentSeqNo) {
-								log.info("BeginSequenceNumber should be greater than 0 and less than Current Sequence Number.");
-								System.out.println("BeginSequenceNumber should be greater than 0 and less than Current Sequence Number.");
-							}
-						}
-						
-						int endSeqNum = beginSeqNum;
-
-						while (endSeqNum!=0 || endSeqNum <= beginSeqNum || endSeqNum > currentSeqNo) {
-							log.info("Enter a EndSequenceNumber between BeginSequencNumber["+beginSeqNum+"] and CurrentSequenceNumber[" + currentSeqNo + "] to continue : ");
-							log.info("Enter '0' To Resend all messages starting from BeginSequencNumber["+beginSeqNum+"] to infinity : ");
-							System.out.println("Enter a EndSequenceNumber between BeginSequencNumber["+beginSeqNum+"] and CurrentSequenceNumber[" + currentSeqNo + "] to continue : ");
-							System.out.println("Enter '0' To Resend all messages starting from BeginSequencNumber["+beginSeqNum+"] to infinity : ");
-							try {
-								endSeqNum = scanner.nextInt();
-							} catch (Exception exe) {
-								endSeqNum = beginSeqNum;								
-							}
-							if (endSeqNum!=0 || endSeqNum <= beginSeqNum || endSeqNum > currentSeqNo) {
-								log.info("EndSequenceNumber should be between BeginSequenceNumber["+beginSeqNum+"] and CurrentSequenceNumber[" + currentSeqNo + "].");
-								System.out.println("EndSequenceNumber should be between BeginSequenceNumber["+beginSeqNum+"] and CurrentSequenceNumber[" + currentSeqNo + "].");
-							}
-						}
-						scanner.close();
-						
-						log.info("Generating ResendReset message with BeginSequenceNumber ["+beginSeqNum+"] and EndSequenceNumber ["+endSeqNum+"]...");
-						System.out.println("Generating ResendReset message with BeginSequenceNumber ["+beginSeqNum+"] and EndSequenceNumber ["+endSeqNum+"]...");
-						
-						ResendRequest resend = new ResendRequest();
-
-						resend.setInt(7, beginSeqNum);
-						resend.setInt(16, endSeqNum);
-						
-						int seqNo = msg.getHeader().getField(new MsgSeqNum()).getValue();
-						resend.setInt(34, ++seqNo);
-
-						log.info("Sending ResendRequest message to Gateway :: " + resend.toString());
-
-						Session.sendToTarget(resend, sessionID); */
-						
-						ResendRequest resend = new ResendRequest();
-		            	int endSeqNo = Session.lookupSession(sessionID).getExpectedTargetNum()-1;
-		            	int beginSeqNo = endSeqNo-10;
-		            	
-		            	// If endSeqNo  is <=0, then set endSeqNo  = 0
-		            	endSeqNo = endSeqNo <=0 ? 0 : endSeqNo;
-		            	
-		            	// If beginSeqNo is <=0, then set beginSeqNo = 1
-		            	beginSeqNo = beginSeqNo <=0 ? 1 : beginSeqNo;
-		            	
-		            	//resend.reverseRoute(msg.getHeader());
-		            	resend.setInt(7, beginSeqNo);
-		            	resend.setInt(16, endSeqNo);	            	
-		            	log.info(resend.toString());
-		            	Session.sendToTarget(resend, sessionID);
-						
-						break;
-
-					default:
-						break;
-					}
-					
-					
-					/*
-					 * log.info("Setting SequenceNumber from SequenceNumberCache..."); 
-					 * msg.getHeader().setInt(34, Session.lookupSession(sessionID).getExpectedSenderNum());
-					 */
+					} 
+				}catch (Exception exe) {
+					//System.out.println("Invalid or no option selected. Processing Heartbeat message \n\n");
+					log.info("Invalid or no option selected. Processing Heartbeat message");				
 				}
-
+				
 				log.info("Sending Heartbeat message from FINRA to Gateway :: SeqNumber [" + msg.getHeader().getField(new MsgSeqNum()) + "] " + msg.toString());
 
 			} else {
 				log.info("Received Heartbeat message from gateway");
 				log.info(msg.toString());
 			}
-		} catch (ConfigError e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		} catch (FieldConvertError e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
+		
 		} catch (Exception e) {
-			// TODO Auto-generated catch block
+			
 			e.printStackTrace();
 		}
 
@@ -723,9 +673,11 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		
 		
 		if("TS".equalsIgnoreCase( secType)) {
-			return "7"+Long.valueOf((nextID++) * System.nanoTime()).toString().substring(0, 9);
+			// return "7"+Long.valueOf((nextID++) * System.nanoTime()).toString().substring(0, 9);
+			return "7"+nextID++;
 		}else {
-			return "1"+Long.valueOf((nextID++) * System.nanoTime()).toString().substring(0, 9);
+			//return "1"+Long.valueOf((nextID++) * System.nanoTime()).toString().substring(0, 9);
+			return "1"+nextID++;
 		}
 		
 	}

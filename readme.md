@@ -17,5 +17,27 @@ steps:
 	--> java -jar <simulator-x.x.x jar name> <config file name> 
 	
 	will run simulator with your configurations.....
+	
+
+Using ---------properties file--------
+
+HeartBtDelay=N/Y
+HeartBtDelayCount=10
+HeartBtDelayTime=15
+
+ResponseMsgDelay=N/Y
+ResponseMsgDelayTime=15
+
+TraceNotAvailable=N/Y
+TraceNotAvailableIntervel=120
+
+
+Using -------------Trade Message ------------------------
+
+Reject response --> Need to send message with 'price=555'
+
+Allege  response -->Need to send message with 'price=777'
+
+For Not Building Tag  "572" ---- > Need to send message with 'price=999'
 	    
 	 	  
