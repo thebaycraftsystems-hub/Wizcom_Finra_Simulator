@@ -535,12 +535,16 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			
 			// NoSide group
 			quickfix.fix44.TradeCaptureReport.NoSides sidesGroup = new quickfix.fix44.TradeCaptureReport.NoSides();
+			
+			String rpid="", cpid="JPMS";
+			Character rpidSide=null, cpidSide=null;
 						
 			log.info("NoSide :: ["+resTrdCapRpt.getNoSides().getValue()+"]");
 			for(int grpIndex = 1; grpIndex<= resTrdCapRpt.getNoSides().getValue(); grpIndex += 1) {
 				// get 'grpIndex' sidesGroup
 				resTrdCapRpt.getGroup(grpIndex, sidesGroup);
-								
+				// sidesGroup.removeField(54);
+				
 				// NoPartyIds subgroup
 				quickfix.fix44.TradeCaptureReport.NoSides.NoPartyIDs partyIdsGroup = new quickfix.fix44.TradeCaptureReport.NoSides.NoPartyIDs();
 				
@@ -552,19 +556,29 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 					log.debug("Before :: PartyID ["+partyIdsGroup.getPartyID().getValue()+"]   PartyRole ["+partyIdsGroup.getPartyRole().getValue()+"]");
 					
 					if(17 == partyIdsGroup.getPartyRole().getValue()) {
-						sidesGroup.removeGroup(partyIdsGroup);						
-						partyIdsGroup.set(new PartyID("JPMS"));						
-						sidesGroup.addGroup(partyIdsGroup);	
-						log.debug("After :: PartyID ["+partyIdsGroup.getPartyID().getValue()+"]   PartyRole ["+partyIdsGroup.getPartyRole().getValue()+"]");
-						break;
-					}					
-				}			
-			}
-			
-			//resTrdCapRpt.addGroup(sidesGroup);	
 						
-			//resTrdCapRpt.setField(new CopyMsgIndicator(true));
-
+						rpid = partyIdsGroup.getPartyID().getValue();
+						
+						if(sidesGroup.getSide().getValue() == '1'){
+							rpidSide = '2';
+							cpidSide = '1';
+						}else {
+							rpidSide = '1';
+							cpidSide = '2';
+						}
+																	
+					}					
+										
+				}
+				sidesGroup.removeGroup(partyIdsGroup);
+								
+			}
+			resTrdCapRpt.removeGroup(sidesGroup);
+			
+			resTrdCapRpt.addGroup( buildSidesGroup(rpidSide, rpid, 1));
+			
+			resTrdCapRpt.addGroup( buildSidesGroup(cpidSide, cpid, 17));
+			
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			
 		} catch (SessionNotFound sessionNotFound) {
@@ -574,6 +588,34 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			java.util.logging.Logger.getLogger(WizFixApplication.class.getName()).log(Level.SEVERE, null, ex);
 		}
 		
+	}
+	
+	
+	private quickfix.fix44.TradeCaptureReport.NoSides buildSidesGroup(Character bsindicator, String partyID, int partyRole)
+			{
+		quickfix.fix44.TradeCaptureReport.NoSides sidesGroup = new quickfix.fix44.TradeCaptureReport.NoSides();
+		
+		
+		try {
+		
+
+		sidesGroup.set(new Side(bsindicator));
+		sidesGroup.set(new OrderID("none"));
+
+		// NoPartyIds subgroup
+		quickfix.fix44.TradeCaptureReport.NoSides.NoPartyIDs partyIdsGroup = new quickfix.fix44.TradeCaptureReport.NoSides.NoPartyIDs();
+
+		partyIdsGroup.set(new PartyID(partyID));
+		partyIdsGroup.set(new PartyRole(partyRole));
+		sidesGroup.addGroup(partyIdsGroup);
+		
+		}catch (Exception ex) {
+			log.error("ERROR :: ",ex);
+			java.util.logging.Logger.getLogger(WizFixApplication.class.getName()).log(Level.SEVERE, null, ex);
+			
+		}
+		return sidesGroup;
+
 	}
 	
 	public void onMessage(Message msg, SessionID sessionID) {
