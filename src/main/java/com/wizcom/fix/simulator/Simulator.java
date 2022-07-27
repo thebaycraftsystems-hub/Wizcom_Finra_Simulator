@@ -56,9 +56,9 @@ public class Simulator {
     	log.info("*************************************************************************************");
     	log.info("*							 WELCOME TO WIZCOM FIX SIMULATOR ");  
     	//log.info("*							 Version ["+settings.getString("WizFixSimlatorVersion")+"]										   *");
-    	log.info("*							 Version [6.0.0]");
+    	log.info("*							 Version [6.1.0]");
     	log.info("*************************************************************************************");
-    	System.out.println("WELCOME TO WIZCOM FIX SIMULATOR \nVersion 6.0.0");
+    	System.out.println("WELCOME TO WIZCOM FIX SIMULATOR \nVersion 6.1.0");
     	
     	WizFixApplication wizFixApplication = new WizFixApplication(settings);
 		MessageStoreFactory messageStoreFactory = new FileStoreFactory( settings );
