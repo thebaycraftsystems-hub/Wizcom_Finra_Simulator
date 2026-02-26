@@ -25,12 +25,14 @@
 			<artifactId>quickfixj-core</artifactId>
 			<version>2.1.0</version>
 		</dependency>
+		
 		<!-- https://mvnrepository.com/artifact/org.quickfixj/quickfixj-messages-all -->
 		<dependency>
-			<groupId>org.quickfixj</groupId>
-			<artifactId>quickfixj-messages-all</artifactId>
-			<version>2.1.0</version>
+		    <groupId>org.quickfixj</groupId>
+		    <artifactId>quickfixj-messages-all</artifactId>
+		    <version>2.1.0</version>
 		</dependency>
+				
 
 		<dependency>
 			<groupId>junit</groupId>
@@ -122,7 +124,7 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-assembly-plugin</artifactId>
-				<version>2.4.1</version>
+				<!-- <version>2.4.1</version> -->
 				<configuration>
 					<!-- get all project dependencies -->
 					<descriptorRefs>
