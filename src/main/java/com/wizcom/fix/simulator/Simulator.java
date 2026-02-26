@@ -2,6 +2,7 @@ package com.wizcom.fix.simulator;
 
 import javax.management.JMException;
 import javax.management.ObjectName;
+import javax.sql.DataSource;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
@@ -11,6 +12,9 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 
 import org.quickfixj.jmx.JmxExporter;
 import org.slf4j.Logger;
@@ -23,6 +27,7 @@ import quickfix.FieldConvertError;
 import quickfix.FileLogFactory;
 import quickfix.FileStoreFactory;
 import quickfix.JdbcLogFactory;
+import quickfix.JdbcStoreFactory;
 import quickfix.LogFactory;
 import quickfix.MessageFactory;
 import quickfix.MessageStoreFactory;
@@ -46,6 +51,9 @@ public class Simulator {
 	private final static Logger log = LoggerFactory.getLogger(Simulator.class);
 	private final SocketAcceptor acceptor;
 	private final Map<InetSocketAddress, List<TemplateMapping>> dynamicSessionMappings = new HashMap<>();
+	/** HikariCP DataSource when DB is used; held for clean shutdown. */
+	private final HikariDataSource jdbcDataSource;
+	private volatile boolean stopped;
 
     private final JmxExporter jmxExporter;
     private final ObjectName connectorObjectName;
@@ -61,29 +69,34 @@ public class Simulator {
     	System.out.println("WELCOME TO WIZCOM FIX SIMULATOR \nVersion 6.0.0");
     	
     	WizFixApplication wizFixApplication = new WizFixApplication(settings);
-		MessageStoreFactory messageStoreFactory = new FileStoreFactory( settings );
         boolean logToFile = false;
         boolean logToDB = false;
         boolean logToScreen = false;
-        LogFactory logFactory;
+        boolean useJdbcStore = false;
         try {
             logToFile = settings.getBool("LogToFile");
             logToDB = settings.getBool("LogToDB");
             logToScreen = settings.getBool("LogToScreen");
+            useJdbcStore = settings.getBool("UseJdbcStore");
         } catch (FieldConvertError ex) {}
-        
-        if ( logToFile && logToDB && logToScreen) {
-            logFactory = new CompositeLogFactory( new LogFactory[] {new ScreenLogFactory(settings), new FileLogFactory(settings), new JdbcLogFactory(settings)});
-        } else if ( logToFile && logToDB ) {
-            logFactory = new CompositeLogFactory( new LogFactory[] { new FileLogFactory(settings), new JdbcLogFactory(settings)});
-        } if ( logToFile && logToScreen) {
-            logFactory = new CompositeLogFactory( new LogFactory[] { new ScreenLogFactory(settings), new FileLogFactory(settings)});
-        } if ( logToDB && logToScreen) {
-            logFactory = new CompositeLogFactory( new LogFactory[] { new ScreenLogFactory(settings), new JdbcLogFactory(settings)});
-        } else if ( logToFile ) {
-            logFactory = new CompositeLogFactory( new LogFactory[] { new FileLogFactory(settings)});
-        } else if ( logToDB ) {
-            logFactory = new CompositeLogFactory( new LogFactory[] { new JdbcLogFactory(settings)});
+
+        // Use HikariCP DataSource when DB is enabled to avoid Proxool + signed SQL Server driver conflict
+        jdbcDataSource = (useJdbcStore || logToDB) ? createJdbcDataSource(settings) : null;
+		MessageStoreFactory messageStoreFactory = createMessageStoreFactory(settings, useJdbcStore, jdbcDataSource);
+
+        LogFactory logFactory;
+        if (logToFile && logToDB && logToScreen) {
+            logFactory = new CompositeLogFactory(new LogFactory[] { new ScreenLogFactory(settings), new FileLogFactory(settings), createJdbcLogFactory(settings, logToDB, jdbcDataSource) });
+        } else if (logToFile && logToDB) {
+            logFactory = new CompositeLogFactory(new LogFactory[] { new FileLogFactory(settings), createJdbcLogFactory(settings, logToDB, jdbcDataSource) });
+        } else if (logToFile && logToScreen) {
+            logFactory = new CompositeLogFactory(new LogFactory[] { new ScreenLogFactory(settings), new FileLogFactory(settings) });
+        } else if (logToDB && logToScreen) {
+            logFactory = new CompositeLogFactory(new LogFactory[] { new ScreenLogFactory(settings), createJdbcLogFactory(settings, logToDB, jdbcDataSource) });
+        } else if (logToFile) {
+            logFactory = new CompositeLogFactory(new LogFactory[] { new FileLogFactory(settings) });
+        } else if (logToDB) {
+            logFactory = new CompositeLogFactory(new LogFactory[] { createJdbcLogFactory(settings, logToDB, jdbcDataSource) });
         } else {
             logFactory = new ScreenLogFactory(settings);
         }
@@ -99,7 +112,63 @@ public class Simulator {
         
         log.info("Acceptor registered with JMX, name={}", connectorObjectName);
     }
-    
+
+    /**
+     * Creates a HikariCP DataSource from JDBC settings (JdbcURL, JdbcUser, JdbcPassword, JdbcDriver).
+     * Used when LogToDB=Y or UseJdbcStore=Y to avoid Proxool + signed SQL Server driver conflict.
+     */
+    private HikariDataSource createJdbcDataSource(SessionSettings settings) throws ConfigError, FieldConvertError {
+        SessionID anySession = getFirstSessionId(settings);
+        String url = settings.getString(anySession, "JdbcURL");
+        String user = settings.getString(anySession, "JdbcUser");
+        String password = settings.getString(anySession, "JdbcPassword");
+        String driverClassName = settings.getString(anySession, "JdbcDriver");
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(url);
+        config.setUsername(user);
+        config.setPassword(password);
+        config.setDriverClassName(driverClassName);
+        config.setMaximumPoolSize(10);
+        config.setMinimumIdle(2);
+        log.info("Using HikariCP DataSource for JDBC store/log (bypasses Proxool)");
+        return new HikariDataSource(config);
+    }
+
+    private SessionID getFirstSessionId(SessionSettings settings) throws ConfigError, FieldConvertError {
+        Iterator<SessionID> it = settings.sectionIterator();
+        if (!it.hasNext()) {
+            throw new ConfigError("At least one [SESSION] or [DEFAULT] required for JDBC settings");
+        }
+        return it.next();
+    }
+
+    private LogFactory createJdbcLogFactory(SessionSettings settings, boolean logToDB, DataSource dataSource) {
+        JdbcLogFactory f = new JdbcLogFactory(settings);
+        if (logToDB && dataSource != null) {
+            f.setDataSource(dataSource);
+        }
+        return f;
+    }
+
+    /**
+     * Creates the message store factory from config.
+     * Set UseJdbcStore=Y (and JDBC settings) to persist sessions and messages in the database;
+     * otherwise uses file-based store (FileStorePath).
+     * When useJdbcStore and dataSource are set, injects DataSource to avoid Proxool.
+     */
+    private MessageStoreFactory createMessageStoreFactory(SessionSettings settings, boolean useJdbcStore, DataSource dataSource) throws ConfigError, FieldConvertError {
+        if (useJdbcStore) {
+            log.info("Using JDBC message store (sessions and messages in database)");
+            JdbcStoreFactory factory = new JdbcStoreFactory(settings);
+            if (dataSource != null) {
+                factory.setDataSource(dataSource);
+            }
+            return factory;
+        }
+        log.info("Using file message store (FileStorePath)");
+        return new FileStoreFactory(settings);
+    }
+
     private void configureDynamicSessions(SessionSettings settings, WizFixApplication wizFixApplication, MessageStoreFactory messageStoreFactory, LogFactory logFactory, MessageFactory messageFactory) throws ConfigError, FieldConvertError {
         //
         // If a session template is detected in the settings, then
@@ -144,31 +213,62 @@ public class Simulator {
         acceptor.start();
     }
 
-    private void stop() {
+    /**
+     * Stops the acceptor and closes the connection pool so the JVM can exit cleanly
+     * (avoids lingering threads and IllegalThreadStateException when run via exec:java).
+     * Safe to call multiple times.
+     */
+    public void stop() {
+        if (stopped) {
+            return;
+        }
+        synchronized (this) {
+            if (stopped) {
+                return;
+            }
+            stopped = true;
+        }
+        log.info("Shutting down FIX Simulator...");
         try {
             jmxExporter.getMBeanServer().unregisterMBean(connectorObjectName);
         } catch (Exception e) {
-            log.error("Failed to unregister acceptor from JMX", e);
+            log.debug("Failed to unregister acceptor from JMX: {}", e.getMessage());
         }
-        acceptor.stop();
+        try {
+            acceptor.stop();
+        } catch (Exception e) {
+            log.debug("Acceptor stop: {}", e.getMessage());
+        }
+        if (jdbcDataSource != null && !jdbcDataSource.isClosed()) {
+            jdbcDataSource.close();
+            log.info("JDBC connection pool closed.");
+        }
+        log.info("FIX Simulator stopped.");
     }
 
     public static void main(String[] args) throws Exception {
+        Simulator simulator = null;
         try {
             InputStream inputStream = getSettingsInputStream(args);
             SessionSettings settings = new SessionSettings(inputStream);
             inputStream.close();
 
-            Simulator simulator = new Simulator(settings);
+            simulator = new Simulator(settings);
+            final Simulator instance = simulator;
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try {
+                    instance.stop();
+                } catch (Exception e) {
+                    log.error("Error during shutdown", e);
+                }
+            }, "Simulator-Shutdown"));
             simulator.start();
-
-         //   System.out.println("press <enter> to quit");
-         //   System.in.read();
-         //   log.debug("Shutdown started........................................");
-         //   System.out.println("Terminated.....................................");
-         //   simulator.stop();
         } catch (Exception e) {
             log.error(e.getMessage(), e);
+            if (simulator != null) {
+                simulator.stop();
+            }
+            throw e;
         }
     }
     

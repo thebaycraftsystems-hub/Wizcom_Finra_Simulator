@@ -74,17 +74,41 @@
 			<version>1.7.5</version>
 		</dependency>
 
+		<!-- Sybase JDBC: not in Maven Central; uncomment and install to local repo if needed -->
+		<!--
 		<dependency>
 			<groupId>com.sybase.jdbc4</groupId>
 			<artifactId>jconn4</artifactId>
 			<version>4.0.0</version>
 		</dependency>
+		-->
 
 		<!-- https://mvnrepository.com/artifact/mysql/mysql-connector-java -->
 		<dependency>
 			<groupId>mysql</groupId>
 			<artifactId>mysql-connector-java</artifactId>
 			<version>5.1.6</version>
+		</dependency>
+
+		<!-- Microsoft SQL Server JDBC driver (for UseJdbcStore / LogToDB) -->
+		<dependency>
+			<groupId>com.microsoft.sqlserver</groupId>
+			<artifactId>mssql-jdbc</artifactId>
+			<version>12.4.2.jre8</version>
+		</dependency>
+
+		<!-- Proxool: fallback when no custom DataSource is set (can conflict with signed SQL Server driver) -->
+		<dependency>
+			<groupId>com.cloudhopper.proxool</groupId>
+			<artifactId>proxool</artifactId>
+			<version>0.9.1</version>
+		</dependency>
+
+		<!-- HikariCP: used as DataSource when LogToDB=Y or UseJdbcStore=Y to avoid Proxool + signed driver conflict -->
+		<dependency>
+			<groupId>com.zaxxer</groupId>
+			<artifactId>HikariCP</artifactId>
+			<version>3.4.5</version>
 		</dependency>
 
 	</dependencies>
@@ -117,6 +141,16 @@
 				<configuration>
 					<source>1.8</source>
 					<target>1.8</target>
+				</configuration>
+			</plugin>
+
+			<!-- Run main class: mvn exec:java -Dexec.mainClass=com.wizcom.fix.simulator.Simulator -->
+			<plugin>
+				<groupId>org.codehaus.mojo</groupId>
+				<artifactId>exec-maven-plugin</artifactId>
+				<version>3.1.0</version>
+				<configuration>
+					<mainClass>com.wizcom.fix.simulator.Simulator</mainClass>
 				</configuration>
 			</plugin>
 
