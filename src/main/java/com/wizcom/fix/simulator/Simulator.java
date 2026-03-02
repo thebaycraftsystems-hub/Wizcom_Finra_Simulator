@@ -3,12 +3,13 @@ package com.wizcom.fix.simulator;
 import javax.management.JMException;
 import javax.management.ObjectName;
 import javax.sql.DataSource;
+import java.io.File;
 import java.io.FileInputStream;
+import java.io.InputStream;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.io.FileNotFoundException;
-import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -63,6 +64,10 @@ public class Simulator {
     
     
     public Simulator(SessionSettings settings) throws ConfigError, FieldConvertError, JMException {
+        this(settings, null);
+    }
+
+    public Simulator(SessionSettings settings, String configResourceName) throws ConfigError, FieldConvertError, JMException {
     	
     	String role = "PRIMARY";
     	try {
@@ -74,7 +79,7 @@ public class Simulator {
     	log.info("*************************************************************************************");
     	System.out.println("WELCOME TO WIZCOM FIX SIMULATOR — Role: " + role + "\nVersion 6.0.0");
     	
-    	WizFixApplication wizFixApplication = new WizFixApplication(settings);
+    	WizFixApplication wizFixApplication = new WizFixApplication(settings, configResourceName);
         boolean logToFile = false;
         boolean logToDB = false;
         boolean logToScreen = false;
@@ -292,7 +297,11 @@ public class Simulator {
             SessionSettings settings = new SessionSettings(inputStream);
             inputStream.close();
 
-            simulator = new Simulator(settings);
+            // Do not reject any message for "Required tag missing" — accept all and send business response
+            forceNoRequiredTagReject(settings);
+
+            String configResourceName = getConfigResourceName(args);
+            simulator = new Simulator(settings, configResourceName);
             final Simulator instance = simulator;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 try {
@@ -311,23 +320,79 @@ public class Simulator {
         }
     }
     
+    /**
+     * Forces UseDataDictionary=N for every section so the engine never rejects a message
+     * with "Required tag missing" for any field. All messages are passed to the app and
+     * get a business response (primary and secondary, and when using an external config).
+     * SessionSettings.sectionIterator() excludes the [DEFAULT] section, so we must set
+     * it explicitly; otherwise sessions inherit UseDataDictionary=Y from default.
+     */
+    private static void forceNoRequiredTagReject(SessionSettings settings) {
+        try {
+            SessionID defaultSection = new SessionID("DEFAULT", "", "");
+            settings.setString(defaultSection, "UseDataDictionary", "N");
+            Iterator<SessionID> it = settings.sectionIterator();
+            while (it.hasNext()) {
+                SessionID sid = it.next();
+                settings.setString(sid, "UseDataDictionary", "N");
+            }
+            log.info("UseDataDictionary=N forced for all sections (including DEFAULT): no 'Required tag missing' reject for any message");
+        } catch (Exception e) {
+            log.warn("Could not force UseDataDictionary=N: {}", e.getMessage());
+        }
+    }
+
+    /** Returns config name/path for primary/secondary (for dump). Null when explicit path given in args. */
+    private static String getConfigResourceName(String[] args) {
+        if (args.length > 0 && !args[0].equalsIgnoreCase("primary") && !args[0].equalsIgnoreCase("--primary")
+                && !args[0].equalsIgnoreCase("secondary") && !args[0].equalsIgnoreCase("--secondary"))
+            return null;
+        if (args.length == 0 || (args.length >= 1 && (args[0].equalsIgnoreCase("primary") || args[0].equalsIgnoreCase("--primary"))))
+            return "quickfixj-server.cfg";
+        return "quickfixj-server-secondary.cfg";
+    }
+
+    /**
+     * Load config: prefer external file in current directory over JAR so Linux (or any host) can use
+     * an updated config (e.g. LogonDelay=N) without rebuilding the JAR.
+     * <ul>
+     *   <li>primary: use ./quickfixj-server.cfg if it exists, else from JAR</li>
+     *   <li>secondary: use ./quickfixj-server-secondary.cfg if it exists, else from JAR</li>
+     *   <li>path given: use that path</li>
+     * </ul>
+     */
     private static InputStream getSettingsInputStream(String[] args) throws FileNotFoundException {
         InputStream inputStream = null;
-        if (args.length == 0 || (args.length >= 1 && (args[0].equalsIgnoreCase("primary") || args[0].equalsIgnoreCase("--primary")))) {
-            inputStream = Simulator.class.getResourceAsStream("quickfixj-server.cfg");
-            log.info("Loading [quickfixj-server.cfg] — PRIMARY simulator");
-        } else if (args.length >= 1 && (args[0].equalsIgnoreCase("secondary") || args[0].equalsIgnoreCase("--secondary"))) {
-            inputStream = Simulator.class.getResourceAsStream("quickfixj-server-secondary.cfg");
-            log.info("Loading [quickfixj-server-secondary.cfg] — SECONDARY (Backup) simulator, same DB as Primary");
-        } else {
+        String source = null;
+        if (args.length > 0 && !args[0].equalsIgnoreCase("primary") && !args[0].equalsIgnoreCase("--primary")
+                && !args[0].equalsIgnoreCase("secondary") && !args[0].equalsIgnoreCase("--secondary")) {
             inputStream = new FileInputStream(args[0]);
-            log.info("Loading file [" + args[0] + "] as configuration file");
+            source = "file [" + args[0] + "]";
+        } else if (args.length == 0 || (args[0].equalsIgnoreCase("primary") || args[0].equalsIgnoreCase("--primary"))) {
+            File external = new File("quickfixj-server.cfg");
+            if (external.isFile()) {
+                inputStream = new FileInputStream(external);
+                source = "file [quickfixj-server.cfg] (current directory, overrides JAR)";
+            } else {
+                inputStream = Simulator.class.getResourceAsStream("quickfixj-server.cfg");
+                source = "JAR [quickfixj-server.cfg]";
+            }
+        } else {
+            File external = new File("quickfixj-server-secondary.cfg");
+            if (external.isFile()) {
+                inputStream = new FileInputStream(external);
+                source = "file [quickfixj-server-secondary.cfg] (current directory, overrides JAR)";
+            } else {
+                inputStream = Simulator.class.getResourceAsStream("quickfixj-server-secondary.cfg");
+                source = "JAR [quickfixj-server-secondary.cfg]";
+            }
         }
         if (inputStream == null) {
             log.error("Configuration file not found. Usage: java -jar fix-simulator.jar [primary|secondary|<path-to.cfg>]");
             System.err.println("Configuration file not found. Usage: java -jar fix-simulator.jar [primary|secondary|<path-to.cfg>]");
             System.exit(1);
         }
+        log.info("Loading config from {} — {}", source, (args.length > 0 && (args[0].equalsIgnoreCase("secondary") || args[0].equalsIgnoreCase("--secondary")) ? "SECONDARY" : "PRIMARY");
         return inputStream;
     }
 }
