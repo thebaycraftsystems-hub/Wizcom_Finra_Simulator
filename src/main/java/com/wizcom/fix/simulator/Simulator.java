@@ -4,6 +4,9 @@ import javax.management.JMException;
 import javax.management.ObjectName;
 import javax.sql.DataSource;
 import java.io.FileInputStream;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
@@ -61,12 +64,15 @@ public class Simulator {
     
     public Simulator(SessionSettings settings) throws ConfigError, FieldConvertError, JMException {
     	
+    	String role = "PRIMARY";
+    	try {
+    	    if (settings.isSetting("SimulatorRole")) role = settings.getString("SimulatorRole").toUpperCase();
+    	} catch (Exception ignored) {}
     	log.info("*************************************************************************************");
-    	log.info("*							 WELCOME TO WIZCOM FIX SIMULATOR ");  
-    	//log.info("*							 Version ["+settings.getString("WizFixSimlatorVersion")+"]										   *");
-    	log.info("*							 Version [6.0.0]");
+    	log.info("* WELCOME TO WIZCOM FIX SIMULATOR — Role: {} ", role);
+    	log.info("* Version [6.0.0]");
     	log.info("*************************************************************************************");
-    	System.out.println("WELCOME TO WIZCOM FIX SIMULATOR \nVersion 6.0.0");
+    	System.out.println("WELCOME TO WIZCOM FIX SIMULATOR — Role: " + role + "\nVersion 6.0.0");
     	
     	WizFixApplication wizFixApplication = new WizFixApplication(settings);
         boolean logToFile = false;
@@ -82,6 +88,10 @@ public class Simulator {
 
         // Use HikariCP DataSource when DB is enabled to avoid Proxool + signed SQL Server driver conflict
         jdbcDataSource = (useJdbcStore || logToDB) ? createJdbcDataSource(settings) : null;
+        if (useJdbcStore && jdbcDataSource != null && !isJdbcStoreSchemaValid(jdbcDataSource, settings)) {
+            log.warn("JDBC store schema invalid (e.g. missing senderlocid/targetlocid). Run sql/quickfixj_sqlserver_schema.sql in trace_fix. Falling back to file store.");
+            useJdbcStore = false;
+        }
 		MessageStoreFactory messageStoreFactory = createMessageStoreFactory(settings, useJdbcStore, jdbcDataSource);
 
         LogFactory logFactory;
@@ -148,6 +158,35 @@ public class Simulator {
             f.setDataSource(dataSource);
         }
         return f;
+    }
+
+    /**
+     * Returns true if the JDBC store tables have the required schema (e.g. senderlocid, targetlocid).
+     * QuickFIX/J 2.x requires these columns; older DB schemas may lack them.
+     * Validates both sessions and messages tables (both are used by JdbcStore).
+     */
+    private boolean isJdbcStoreSchemaValid(DataSource dataSource, SessionSettings settings) {
+        String sessionsTable = "TRACE_FIX_SESSIONS";
+        String messagesTable = "TRACE_FIX_MESSAGES";
+        try {
+            SessionID any = getFirstSessionId(settings);
+            if (settings.isSetting(any, "JdbcStoreSessionsTableName")) {
+                sessionsTable = settings.getString(any, "JdbcStoreSessionsTableName");
+            }
+            if (settings.isSetting(any, "JdbcStoreMessagesTableName")) {
+                messagesTable = settings.getString(any, "JdbcStoreMessagesTableName");
+            }
+        } catch (ConfigError | FieldConvertError e) {
+            return false;
+        }
+        try (Connection conn = dataSource.getConnection(); Statement st = conn.createStatement()) {
+            st.executeQuery("SELECT TOP 1 senderlocid, targetlocid FROM " + sessionsTable + " WHERE 1=0");
+            st.executeQuery("SELECT TOP 1 senderlocid, targetlocid FROM " + messagesTable + " WHERE 1=0");
+            return true;
+        } catch (SQLException e) {
+            log.debug("JDBC store schema check failed: {}", e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -274,16 +313,19 @@ public class Simulator {
     
     private static InputStream getSettingsInputStream(String[] args) throws FileNotFoundException {
         InputStream inputStream = null;
-        if (args.length == 0) {            
-        	inputStream = Simulator.class.getResourceAsStream("quickfixj-server.cfg");
-        	log.info("Loading default file [quickfixj-server.cfg] as configuration file");
-        } else if (args.length == 1) {
+        if (args.length == 0 || (args.length >= 1 && (args[0].equalsIgnoreCase("primary") || args[0].equalsIgnoreCase("--primary")))) {
+            inputStream = Simulator.class.getResourceAsStream("quickfixj-server.cfg");
+            log.info("Loading [quickfixj-server.cfg] — PRIMARY simulator");
+        } else if (args.length >= 1 && (args[0].equalsIgnoreCase("secondary") || args[0].equalsIgnoreCase("--secondary"))) {
+            inputStream = Simulator.class.getResourceAsStream("quickfixj-server-secondary.cfg");
+            log.info("Loading [quickfixj-server-secondary.cfg] — SECONDARY (Backup) simulator, same DB as Primary");
+        } else {
             inputStream = new FileInputStream(args[0]);
-            log.info("Loading file ["+args[0]+"] as configuration file");
+            log.info("Loading file [" + args[0] + "] as configuration file");
         }
         if (inputStream == null) {
-        	log.info("Configuration file not found :: " + Simulator.class.getName() + " [configFile].");
-            System.out.println("Configuration file not found :: " + Simulator.class.getName() + " [configFile].");
+            log.error("Configuration file not found. Usage: java -jar fix-simulator.jar [primary|secondary|<path-to.cfg>]");
+            System.err.println("Configuration file not found. Usage: java -jar fix-simulator.jar [primary|secondary|<path-to.cfg>]");
             System.exit(1);
         }
         return inputStream;

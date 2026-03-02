@@ -1,6 +1,7 @@
 -- QuickFIX/J JDBC schema for SQL Server (table names match quickfixj-server.cfg: TRACE_FIX_*)
 -- This project uses database trace_fix only. Do NOT use or create database "quickfix".
 -- Run in database trace_fix when UseJdbcStore=Y and LogToDB=Y.
+-- New DB: run this script. Existing tables missing senderlocid/targetlocid? Run quickfixj_sqlserver_add_locid_columns.sql instead.
 -- Example: sqlcmd -S 192.168.1.14,1433 -d trace_fix -U wizcom -P Wizcom@12345 -i quickfixj_sqlserver_schema.sql
 -- In SSMS: select database trace_fix, then execute this script.
 

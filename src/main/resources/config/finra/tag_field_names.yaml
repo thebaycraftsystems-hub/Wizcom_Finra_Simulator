@@ -1,0 +1,25 @@
+# FIX tag number -> field name (for validation error messages).
+# Used when reporting MISSING REQUIRED FIELD to include field detail.
+
+32: LastQty
+31: LastPx
+37: OrderID
+17: ExecID
+38: OrderQty
+48: SecurityID
+22: SecurityIDSource
+55: Symbol
+54: Side
+60: TransactTime
+75: TradeDate
+152: SettlDate
+153: SettlType
+487: TradeReportTransType
+552: NoSides
+571: TradeReportID
+939: TradeReportType
+22011: ControlDate
+22012: OriginalControlDate
+1126: OriginalTradeID
+1003: TradeID
+22009: ReversalTimestamp

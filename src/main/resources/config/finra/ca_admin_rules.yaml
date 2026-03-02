@@ -1,0 +1,37 @@
+# FINRA TRACE CA (Corporates and Agencies) - Admin and session compliance
+# Sequence, PossDupFlag, GapFill, ResetSeqNum. Enforce via QuickFIX/J config + validation.
+
+version: "2.1"
+product: "CA"
+
+session:
+  strict_sequence_validation: true
+  ResetSeqNumFlag_behavior: "reset_incoming_outgoing_on_Y"
+  PossDupFlag_behavior: "allow_43_Y_for_retransmit_only"
+  GapFill_123_Y: "SequenceReset with 123=Y is GapFill; do not reset sequence"
+
+admin_handling:
+  Logon_35_A:
+    required: [98, 108, 141]
+    ResetSeqNumFlag_89: "optional; when Y, reset sequences"
+  Heartbeat_35_0:
+    TestReqID_112: "optional"
+  TestRequest_35_1:
+    required: [112]
+  ResendRequest_35_2:
+    required: [7, 16]
+  Logout_35_5:
+    Text_58: "optional"
+  SequenceReset_35_4:
+    required: [36]
+    GapFill_123: "Y = GapFill, N = reset"
+
+# QuickFIX/J config recommendations (do not change DB dump)
+config_recommendations:
+  ResetOnLogon: N
+  ResetOnLogout: N
+  ResetOnDisconnect: N
+  ResetOnError: N
+  UseDataDictionary: Y
+  ValidateSequenceNumbers: Y
+  CheckLatency: N

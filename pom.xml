@@ -13,7 +13,7 @@
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<mainClass>quickfix.wizcom.fix.simulator.Simulator</mainClass>
+		<mainClass>com.wizcom.fix.simulator.Simulator</mainClass>
 		<maven.compiler.target>1.8</maven.compiler.target>
 		<maven.compiler.source>1.8</maven.compiler.source>
 	</properties>
@@ -111,6 +111,37 @@
 			<version>3.4.5</version>
 		</dependency>
 
+		<!-- YAML for FINRA compliance rule files (config/finra/*.yaml) -->
+		<dependency>
+			<groupId>org.yaml</groupId>
+			<artifactId>snakeyaml</artifactId>
+			<version>1.33</version>
+		</dependency>
+
+		<!-- Specs RAG (Java-only, no GPU): PDF text + full-text search on Linux -->
+		<dependency>
+			<groupId>org.apache.pdfbox</groupId>
+			<artifactId>pdfbox</artifactId>
+			<version>2.0.29</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.lucene</groupId>
+			<artifactId>lucene-core</artifactId>
+			<version>8.11.2</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.lucene</groupId>
+			<artifactId>lucene-queryparser</artifactId>
+			<version>8.11.2</version>
+		</dependency>
+
+		<!-- TRACE SP FIX Reference (xlsx): mandatory/required/ignored per message sheet -->
+		<dependency>
+			<groupId>org.apache.poi</groupId>
+			<artifactId>poi-ooxml</artifactId>
+			<version>5.2.3</version>
+		</dependency>
+
 	</dependencies>
 
 	<build>
@@ -175,11 +206,31 @@
 				<executions>
 					<execution>
 						<id>make-assembly</id>
-						<!-- bind to the packaging phase -->
 						<phase>package</phase>
 						<goals>
 							<goal>single</goal>
 						</goals>
+					</execution>
+				</executions>
+			</plugin>
+			<!-- Copy fat jar to fix-simulator.jar so: java -jar target/fix-simulator.jar [primary|secondary] -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-antrun-plugin</artifactId>
+				<version>3.1.0</version>
+				<executions>
+					<execution>
+						<id>copy-jar</id>
+						<phase>package</phase>
+						<goals>
+							<goal>run</goal>
+						</goals>
+						<configuration>
+							<target>
+								<copy file="${project.build.directory}/${project.artifactId}-${project.version}-jar-with-dependencies.jar"
+								      tofile="${project.build.directory}/fix-simulator.jar" />
+							</target>
+						</configuration>
 					</execution>
 				</executions>
 			</plugin>

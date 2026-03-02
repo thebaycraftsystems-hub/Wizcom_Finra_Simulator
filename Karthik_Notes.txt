@@ -1,0 +1,60 @@
+Here’s why those tables are empty and how to get data into them.
+Why you see no rows
+TRACE_FIX_SESSIONS / TRACE_FIX_MESSAGES
+=============================================
+The simulator is using the file store (fallback) because the JDBC store schema check failed (missing senderlocid/targetlocid). With file store, session state and stored messages go to files under FileStorePath=data, not to these tables.
+
+
+
+TRACE_FIX_MESSAGES_LOG
+=======================================
+Rows appear only when:
+LogToDB=Y is set (you have this), and
+The app actually logs messages (e.g. after a FIX client connects and there is traffic).
+If no client has connected, or the JDBC log tables have the wrong schema, you’ll see no rows.
+How to get data into these tables
+Apply the correct schema so the app can use JDBC store and JDBC logging:
+In the trace_fix database, run:
+src/main/resources/sql/quickfixj_sqlserver_schema.sql
+
+
+Those rows are session event log entries, not FIX application messages.
+What TRACE_FIX_EVENT_LOG is
+QuickFIX/J writes session lifecycle and internal events to the event log. The text column is a short description of what happened; it is not the FIX message body (no tags like 35=, 11=, etc.).
+
+What your rows mean
+id	text	Meaning
+59	Session FIX.4.4:FNRA/SP->JPMS/44B1 schedule is daily, 05:10:00-UTC - 04:59:59-UTC...	Session’s trading schedule (when it’s active).
+60	Created session: FIX.4.4:FNRA/SP->JPMS/44B1	Session was created (acceptor ready for that session).
+61–62	Same for FNRA/TS->JPMS/44B3	Same for the TS session.
+63–64	Same for FNRA/CA->JPMS/44B2	Same for the CA session.
+
+
+So these are startup/session events: schedule info and “session created” for each of the three configured sessions (SP, TS, CA).
+Where the actual FIX messages are
+TRACE_FIX_EVENT_LOG → events only (schedule, “Created session”, connection/disconnect, errors, etc.). No FIX message content.
+TRACE_FIX_MESSAGES_LOG → incoming and outgoing FIX messages (the real wire format: Logon, Heartbeat, application messages, etc.). That’s where you see the tag=value content.
+So: the rows you’re looking at in TRACE_FIX_EVENT_LOG are normal event messages describing session setup; the actual FIX messages will show up in TRACE_FIX_MESSAGES_LOG once a client connects and traffic is logged (and if LogToDB is writing to that table).
+
+
+
+
+
+That creates/updates the tables with the required columns (including senderlocid, targetlocid).
+Restart the simulator after the schema is in place.
+Then:
+
+TRACE_FIX_SESSIONS and TRACE_FIX_MESSAGES will be used (and filled) because the simulator will use the JDBC store instead of the file store.
+
+
+TRACE_FIX_MESSAGES_LOG will get rows when the simulator logs incoming/outgoing messages (e.g. after a client connects and sends/receives FIX messages).
+Generate some traffic
+Connect a FIX client to the simulator and exchange messages (e.g. Logon, heartbeats, application messages). That will:
+Update TRACE_FIX_SESSIONS (e.g. sequence numbers).
+Insert into TRACE_FIX_MESSAGES when messages are stored for resend.
+Insert into TRACE_FIX_MESSAGES_LOG when messages are logged (if LogToDB=Y and schema is correct).
+Quick check
+
+
+If TRACE_FIX_SESSIONS and TRACE_FIX_MESSAGES are empty but the simulator is running, it’s almost certainly using the file store. After running the schema script and restarting, you should see rows in these tables once sessions exist and traffic flows.
+For TRACE_FIX_MESSAGES_LOG, run the same schema script (it includes the log table), then restart and generate some FIX traffic; rows should appear when messages are logged.

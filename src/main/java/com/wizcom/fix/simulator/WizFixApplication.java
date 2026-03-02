@@ -4,8 +4,11 @@
 package com.wizcom.fix.simulator;
 
 import java.text.SimpleDateFormat;
+import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.logging.Level;
@@ -41,6 +44,8 @@ import quickfix.fix44.TradeCaptureReportAck;
 import quickfix.fix44.component.Instrument;
 import quickfix.fix44.component.Parties;
 
+import com.wizcom.fix.simulator.compliance.CompliancePipeline;
+
 /**
  * @author subhash
  *
@@ -62,6 +67,13 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	int myOption=0;
 //	TimedScan timedScanner = new TimedScan(System.in);
 	private boolean traceNotAvailable = false;
+
+	private final CompliancePipeline compliancePipeline = new CompliancePipeline();
+
+	/** Sessions waiting to send Logon back to initiator (LogonDelay); ignore all messages until we send Logon. */
+	private final Set<SessionID> pendingLogonResponseSessions = Collections.synchronizedSet(new HashSet<>());
+	/** Sessions waiting to send Heartbeat to initiator (HeartBtDelay); ignore all messages until we send Heartbeat. */
+	private final Set<SessionID> pendingHeartbeatResponseSessions = Collections.synchronizedSet(new HashSet<>());
 	
 		
 //    private SessionID currentSession;
@@ -117,22 +129,123 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	public void onLogout(SessionID arg0) {	}
 		
 	public void fromAdmin(Message arg0, SessionID arg1) throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, RejectLogon {
-		log.info("Recieved Admin message from Gateway :: "+arg0.toString());		
+		if (pendingLogonResponseSessions.contains(arg1) || pendingHeartbeatResponseSessions.contains(arg1)) {
+			log.info("Ignoring admin message until we send Logon/Heartbeat back to initiator: [ {} ]", arg0.toString());
+			return;
+		}
+		boolean logonRequired = getBoolSetting(arg1, "LogonRequired", true);
+		if (!logonRequired) {
+			log.info("Picked message from initiator: [ {} ]. Since we configured LogonRequired=N, not sending any response to initiator.", arg0.toString());
+			String msgType = null;
+			try { msgType = arg0.getHeader().getField(new MsgType()).getValue(); } catch (FieldNotFound ignored) { }
+			if ("A".equals(msgType)) {
+				throw new RejectLogon("LogonRequired=N: simulator does not send Logon", false, -1);
+			}
+			return;
+		}
+		String msgType = null;
+		try { msgType = arg0.getHeader().getField(new MsgType()).getValue(); } catch (FieldNotFound ignored) { }
+		if ("A".equals(msgType) && logonRequired) {
+			boolean logonDelay = getBoolSetting(arg1, "LogonDelay", false);
+			if (logonDelay) {
+				int secs = getIntSetting(arg1, "LogonDelayinSecs", 0);
+				if (secs > 0) {
+					pendingLogonResponseSessions.add(arg1);
+					log.warn("LogonDelay=Y: waiting {}s before accepting logon. Ignoring all messages until we send Logon back. Ensure the initiator's logon response timeout is greater than {}s.", secs, secs);
+					try {
+						Thread.sleep(secs * 1000L);
+					} catch (InterruptedException e) {
+						Thread.currentThread().interrupt();
+						pendingLogonResponseSessions.remove(arg1);
+						log.warn("Logon delay interrupted");
+					}
+					log.info("LogonDelay: {}s elapsed, accepting logon and sending Logon to initiator for session {}", secs, arg1);
+				}
+			}
+		}
+		log.info("Recieved Admin message from Gateway :: "+arg0.toString());
 	}
 	
 	public void toAdmin(Message arg0, SessionID arg1) {
-	//	log.info("Sending message to Gateway ::");
-	//	log.info(arg0.toString());		
-		try {			
+		try {
+			String msgType = arg0.getHeader().getField(new MsgType()).getValue();
+			if ("A".equals(msgType)) {
+				pendingLogonResponseSessions.remove(arg1);
+				boolean logonRequired = getBoolSetting(arg1, "LogonRequired", true);
+				if (!logonRequired) {
+					log.info("LogonRequired=N: not sending any response (Logon) to initiator for session {}", arg1);
+					throwDoNotSend();
+				}
+			}
+			if ("0".equals(msgType)) {
+				pendingHeartbeatResponseSessions.remove(arg1);
+				boolean heartbeatRequired = getBoolSetting(arg1, "HeartBeat_Required", true);
+				if (!heartbeatRequired) {
+					log.info("HeartBeat_Required=N: not sending Heartbeat to initiator for session {}", arg1);
+					throwDoNotSend();
+				}
+				boolean heartBtDelay = getBoolSetting(arg1, "HeartBtDelay", false);
+				if (heartbeatRequired && heartBtDelay) {
+					int secs = getIntSetting(arg1, "HeartBtDelayTime", 0);
+					if (secs > 0) {
+						pendingHeartbeatResponseSessions.add(arg1);
+						log.warn("HeartBtDelay=Y: waiting {}s before sending Heartbeat. Ignoring all messages until we send Heartbeat.", secs);
+						try {
+							Thread.sleep(secs * 1000L);
+						} catch (InterruptedException e) {
+							Thread.currentThread().interrupt();
+							pendingHeartbeatResponseSessions.remove(arg1);
+							log.warn("Heartbeat delay interrupted");
+						}
+						pendingHeartbeatResponseSessions.remove(arg1);
+						log.info("HeartBtDelay: {}s elapsed, sending Heartbeat to initiator for session {}", secs, arg1);
+					}
+				}
+			}
 			crack(arg0, arg1);
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
-			e.printStackTrace();
+		}
+	}
+
+	/** Throws DoNotSend without declaring it (Application.toAdmin does not declare throws DoNotSend). */
+	@SuppressWarnings("unchecked")
+	private static void throwDoNotSend() {
+		throw (RuntimeException) (Throwable) new DoNotSend();
+	}
+
+	private boolean getBoolSetting(SessionID sessionID, String key, boolean defaultValue) {
+		try {
+			if (sessionID != null && settings.isSetting(sessionID, key))
+				return settings.getBool(sessionID, key);
+			return settings.getBool(key);
+		} catch (Exception ignored) {
+			return defaultValue;
+		}
+	}
+
+	private int getIntSetting(SessionID sessionID, String key, int defaultValue) {
+		try {
+			if (sessionID != null && settings.isSetting(sessionID, key))
+				return (int) settings.getLong(sessionID, key);
+			return (int) settings.getLong(key);
+		} catch (Exception ignored) {
+			return defaultValue;
 		}
 	}
 
 	public void fromApp(Message arg0, SessionID arg1) throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, UnsupportedMessageType {
+		if (pendingLogonResponseSessions.contains(arg1) || pendingHeartbeatResponseSessions.contains(arg1)) {
+			log.info("Ignoring app message until we send Logon/Heartbeat back to initiator: [ {} ]", arg0.toString());
+			return;
+		}
+		boolean logonRequired = getBoolSetting(arg1, "LogonRequired", true);
+		if (!logonRequired) {
+			log.info("Picked message from initiator: [ {} ]. Since we configured LogonRequired=N, not sending any response to initiator.", arg0.toString());
+			return;
+		}
 		log.info("Request message received from Gateway :: [ "+ arg0.toString() +" ]");
+		if (compliancePipeline.processIncoming(arg0, arg1)) return;
 		crack(arg0, arg1);
 	}
 
@@ -351,7 +464,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			resTrdCapRpt.reverseRoute(reqTrdCapRpt.getHeader());			
 			
 			Session.sendToTarget(resTrdCapRpt, sessionID);
-			
+			compliancePipeline.getLifecycleEngine().markAccepted(reqTrdCapRpt.getTradeReportID().getValue(), sessionID);
+
 			if(777 == reqTrdCapRpt.getLastPx().getValue()) {
 				log.info("*****    Processing NEW ALLEGE request....");				
 				processingAllege(resTrdCapRpt, sessionID, securityType, "SPAL");				
@@ -725,27 +839,30 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			if ( senderCompID.equalsIgnoreCase(sessionID.getSenderCompID())) {
 				heartbeatcount++;
 				try {
-					heartBtDelay = settings.getBool("HeartBtDelay");
-					heartBtDelayCount = settings.getInt("HeartBtDelayCount");
-					
-					//System.out.println("HeartBtDelay :: "+heartBtDelay + " \t HeartBtDelayCount :: "+heartBtDelayCount + "Current HeartBtCount :: "+heartbeatcount);
-					log.info("HeartBtDelay :: "+heartBtDelay + " \t HeartBtDelayCount :: "+heartBtDelayCount + "Current HeartBtCount :: "+heartbeatcount);
-					
-					if (heartBtDelay && heartbeatcount == heartBtDelayCount) {
-						if(settings.getInt("HeartBtDelayTime") > 0 ) {
-							//System.out.println("Heart Beat Delay Time is ["+settings.getInt("HeartBtDelayTime")+"]");
-							log.info("Heart Beat Delay Time is ["+ settings.getInt("HeartBtDelayTime") +"]");
-							Thread.sleep(settings.getInt("HeartBtDelayTime") * 1000);
-						}else {
-							//System.out.println("Defalut Heart Beat Delay Time ["+ 15 +"] setting ...");
-							log.info("Defalut Heart Beat Delay Time is ["+ 15 +"] setting ...");
-							Thread.sleep(15 * 1000);
-						}		
+					boolean heartbeatRequired = getBoolSetting(sessionID, "HeartBeat_Required", true);
+					if (heartbeatRequired) {
+						heartBtDelay = settings.getBool("HeartBtDelay");
+						heartBtDelayCount = settings.getInt("HeartBtDelayCount");
 						
-						log.info("Heartbeat message from FINRA to Gateway is ::" + msg.toString());
-						heartbeatcount = 0;
+						//System.out.println("HeartBtDelay :: "+heartBtDelay + " \t HeartBtDelayCount :: "+heartBtDelayCount + "Current HeartBtCount :: "+heartbeatcount);
+						log.info("HeartBtDelay :: "+heartBtDelay + " \t HeartBtDelayCount :: "+heartBtDelayCount + "Current HeartBtCount :: "+heartbeatcount);
 						
-					} 
+						if (heartBtDelay && heartbeatcount == heartBtDelayCount) {
+							if(settings.getInt("HeartBtDelayTime") > 0 ) {
+								//System.out.println("Heart Beat Delay Time is ["+settings.getInt("HeartBtDelayTime")+"]");
+								log.info("Heart Beat Delay Time is ["+ settings.getInt("HeartBtDelayTime") +"]");
+								Thread.sleep(settings.getInt("HeartBtDelayTime") * 1000);
+							}else {
+								//System.out.println("Defalut Heart Beat Delay Time ["+ 15 +"] setting ...");
+								log.info("Defalut Heart Beat Delay Time is ["+ 15 +"] setting ...");
+								Thread.sleep(15 * 1000);
+							}		
+							
+							log.info("Heartbeat message from FINRA to Gateway is ::" + msg.toString());
+							heartbeatcount = 0;
+							
+						} 
+					}
 				}catch (Exception exe) {
 					//System.out.println("Invalid or no option selected. Processing Heartbeat message \n\n");
 					log.info("Invalid or no option selected. Processing Heartbeat message");				

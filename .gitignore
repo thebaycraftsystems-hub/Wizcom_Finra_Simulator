@@ -65,6 +65,9 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Spec index (Java RAG; rebuilt with SpecRetrievalMain build)
+docs/Specification/.lucene-index/
+
 # Other
 *.swp
 *~

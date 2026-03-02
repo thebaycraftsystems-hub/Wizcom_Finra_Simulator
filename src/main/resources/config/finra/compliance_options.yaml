@@ -1,0 +1,5 @@
+# FINRA compliance behaviour (simulator).
+# When reject_on_missing_required is false, missing required or conditional fields are logged but
+# the trade is NOT rejected (no SPRE). Use so that FINRA does not reject because of missing fields.
+
+reject_on_missing_required: false

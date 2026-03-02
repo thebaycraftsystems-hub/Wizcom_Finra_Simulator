@@ -1,0 +1,69 @@
+# Specification file and page references by product (56=FNRA, 57=SP|CA|TS).
+# Product is derived from session TargetSubID (acceptor SenderSubID): SP, CA, or TS.
+# Update 'page' from the PDFs: SP_2.1.pdf, CA_2.1.pdf, TS_2.1.pdf
+
+SP:
+  spec_file: "docs/Specification/SP/SP_2.1.pdf"
+  spec_name: "SP_2.1"
+  tags:
+    38: { name: OrderQty, page: 0 }
+    32: { name: LastQty, page: 0 }
+    31: { name: LastPx, page: 0 }
+    48: { name: SecurityID, page: 0 }
+    22: { name: SecurityIDSource, page: 0 }
+    552: { name: NoSides, page: 0 }
+    571: { name: TradeReportID, page: 0 }
+    939: { name: TradeReportType, page: 0 }
+    75: { name: TradeDate, page: 0 }
+    60: { name: TransactTime, page: 0 }
+    64: { name: SettlDate, page: 0 }
+    63: { name: SettlType, page: 0 }
+    487: { name: TradeReportTransType, page: 0 }
+    22011: { name: ControlDate, page: 0 }
+    22012: { name: OriginalControlDate, page: 0 }
+    1126: { name: OriginalTradeID, page: 0 }
+    22009: { name: ReversalTimestamp, page: 0 }
+
+CA:
+  spec_file: "docs/Specification/CA/CA_2.1.pdf"
+  spec_name: "CA_2.1"
+  tags:
+    38: { name: OrderQty, page: 0 }
+    32: { name: LastQty, page: 0 }
+    31: { name: LastPx, page: 0 }
+    48: { name: SecurityID, page: 0 }
+    22: { name: SecurityIDSource, page: 0 }
+    552: { name: NoSides, page: 0 }
+    571: { name: TradeReportID, page: 0 }
+    939: { name: TradeReportType, page: 0 }
+    75: { name: TradeDate, page: 0 }
+    60: { name: TransactTime, page: 0 }
+    64: { name: SettlDate, page: 0 }
+    63: { name: SettlType, page: 0 }
+    487: { name: TradeReportTransType, page: 0 }
+    22011: { name: ControlDate, page: 0 }
+    22012: { name: OriginalControlDate, page: 0 }
+    1126: { name: OriginalTradeID, page: 0 }
+    22009: { name: ReversalTimestamp, page: 0 }
+
+TS:
+  spec_file: "docs/Specification/TS/TS_2.1.pdf"
+  spec_name: "TS_2.1"
+  tags:
+    38: { name: OrderQty, page: 0 }
+    32: { name: LastQty, page: 0 }
+    31: { name: LastPx, page: 0 }
+    48: { name: SecurityID, page: 0 }
+    22: { name: SecurityIDSource, page: 0 }
+    552: { name: NoSides, page: 0 }
+    571: { name: TradeReportID, page: 0 }
+    939: { name: TradeReportType, page: 0 }
+    75: { name: TradeDate, page: 0 }
+    60: { name: TransactTime, page: 0 }
+    64: { name: SettlDate, page: 0 }
+    63: { name: SettlType, page: 0 }
+    487: { name: TradeReportTransType, page: 0 }
+    22011: { name: ControlDate, page: 0 }
+    22012: { name: OriginalControlDate, page: 0 }
+    1126: { name: OriginalTradeID, page: 0 }
+    22009: { name: ReversalTimestamp, page: 0 }

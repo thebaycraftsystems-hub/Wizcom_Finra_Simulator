@@ -1,0 +1,33 @@
+# FINRA TRACE mandatory fields for TradeCaptureReport (35=AE). Tag numbers from FIX44.xml.
+# Source: FINRA TRACE SP/CA/TS specification PDFs (docs/Specification/). Verify against those.
+# NOT mandatory for FINRA TRACE: 63 (SettlType), 38 (OrderQty), 55 (Symbol).
+
+SP:
+  spec_file: "docs/Specification/SP/SP_2.1.pdf"
+  spec_name: "SP_2.1"
+  required_tags: [571, 32, 31, 75, 60, 552, 48, 22, 64, 939]
+  required_but_ignored: [37, 17]
+  conditional_new: [487, 22011]
+  conditional_cancel: [487, 569]
+  conditional_correction: [487, 569, 22011, 22012, 1003, 1126]
+  conditional_reversal: [487, 22009]
+
+CA:
+  spec_file: "docs/Specification/CA/CA_2.1.pdf"
+  spec_name: "CA_2.1"
+  required_tags: [571, 32, 31, 75, 60, 552, 48, 22, 64, 939]
+  required_but_ignored: [37, 17]
+  conditional_new: [487, 22011]
+  conditional_cancel: [487, 569]
+  conditional_correction: [487, 569, 22011, 22012, 1003, 1126]
+  conditional_reversal: [487, 22009]
+
+TS:
+  spec_file: "docs/Specification/TS/TS_2.1.pdf"
+  spec_name: "TS_2.1"
+  required_tags: [571, 32, 31, 75, 60, 552, 48, 22, 64, 939]
+  required_but_ignored: [37, 17]
+  conditional_new: [487, 22011]
+  conditional_cancel: [487, 569]
+  conditional_correction: [487, 569, 22011, 22012, 1003, 1126]
+  conditional_reversal: [487, 22009]
