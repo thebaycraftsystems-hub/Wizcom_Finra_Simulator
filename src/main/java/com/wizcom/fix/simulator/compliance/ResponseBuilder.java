@@ -11,8 +11,8 @@ import quickfix.fix44.TradeCaptureReportAck;
 import quickfix.IntField;
 
 /**
- * Builds and sends SPRE (35=AR TradeCaptureReportAck) with reject reason.
- * Does not modify any DB message persistence; Session.sendToTarget triggers existing log layer.
+ * Builds and sends SPRE (35=AR TradeCaptureReportAck) to Trace gateway (initiator) with reject reason.
+ * Only outgoing responses to initiator; does not modify incoming messages or DB persistence.
  */
 public final class ResponseBuilder {
 
@@ -39,7 +39,8 @@ public final class ResponseBuilder {
         ack.setField(new TradeReportTransType(req.getTradeReportTransType().getValue()));
         ack.setField(new TradeReportType(req.getTradeReportType().getValue()));
         ack.setField(new ExecType(ExecType.REJECTED));
-        ack.setField(new IntField(939, 1)); // TradeRptStatus REJECTED
+        ack.setField(new IntField(750, 2)); // TradeRequestStatus REJECTED (required for AR)
+        ack.setField(new IntField(939, 1)); // TrdRptStatus REJECTED
         ack.set(req.getInstrument());
         ack.setField(new TradeReportRejectReason(rejectCode));
         ack.setField(new Text(rejectText != null ? rejectText : rejectCodes.getText(rejectCode)));

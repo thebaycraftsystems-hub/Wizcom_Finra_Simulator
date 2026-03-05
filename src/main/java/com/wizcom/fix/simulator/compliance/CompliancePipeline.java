@@ -20,10 +20,19 @@ public final class CompliancePipeline {
     private final LifecycleEngine lifecycleEngine;
     private final ResponseBuilder responseBuilder;
 
+    /** Uses in-memory lifecycle store (state not persisted to TRACE_LIFECYCLE_STATE). */
     public CompliancePipeline() {
+        this(null);
+    }
+
+    /**
+     * Uses the given store if non-null (e.g. JdbcLifecycleStore for TRACE_LIFECYCLE_STATE);
+     * otherwise uses InMemoryLifecycleStore.
+     */
+    public CompliancePipeline(LifecycleStateStore store) {
         RejectCodes rejectCodes = new RejectCodes();
         this.specValidation = new SpecValidationEngine();
-        this.lifecycleEngine = new LifecycleEngine(new InMemoryLifecycleStore());
+        this.lifecycleEngine = new LifecycleEngine(store != null ? store : new InMemoryLifecycleStore());
         this.responseBuilder = new ResponseBuilder(rejectCodes);
     }
 
@@ -49,13 +58,8 @@ public final class CompliancePipeline {
             }
             return false;
         } catch (FieldNotFound e) {
-            log.debug("Pipeline field error: {}", e.getMessage());
-            try {
-                responseBuilder.sendSPRE(message, sessionID, 4062, "DATA TYPE VIOLATION");
-            } catch (Exception e2) {
-                log.warn("Could not send SPRE: {}", e2.getMessage());
-            }
-            return true;
+            log.debug("Pipeline field missing: {} — not rejecting (missing fields accepted).", e.getMessage());
+            return false;
         } catch (SessionNotFound e) {
             log.warn("Session not found when sending SPRE: {}", e.getMessage());
             return true;

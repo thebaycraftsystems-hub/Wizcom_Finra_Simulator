@@ -4,12 +4,12 @@ The simulator relies on **QuickFIX/J** for session-level behavior. No change to 
 
 ## Admin message handling (35=A, 0, 1, 2, 5, 4)
 
-- **Logon (35=A)** – QuickFIX/J validates required fields (98, 108, 141); ResetSeqNumFlag(89)=Y resets sequences when configured.
+- **Logon (35=A)** – QuickFIX/J validates required fields (98, 108, 141); ResetSeqNumFlag(141)=Y resets sequences when configured.
 - **Heartbeat (35=0)** – Optional TestReqID(112).
 - **TestRequest (35=1)** – Required TestReqID(112).
 - **ResendRequest (35=2)** – Required BeginSeqNo(7), EndSeqNo(16); engine performs resend.
 - **Logout (35=5)** – Optional Text(58).
-- **SequenceReset (35=4)** – MsgSeqNum(36) required; GapFill(123)=Y means Gap Fill (do not reset sender’s sequence).
+- **SequenceReset (35=4)** – NewSeqNo(36) required; on full reset we set next outgoing to NewSeqNo+1; GapFill(123)=Y means Gap Fill (do not reset sender’s sequence).
 
 ## Config enforcement (quickfixj-server.cfg)
 

@@ -89,17 +89,21 @@ CREATE TABLE dbo.TRACE_FIX_MESSAGES (
 
 -- Message log (JdbcLogIncomingTable / JdbcLogOutgoingTable = TRACE_FIX_MESSAGES_LOG)
 CREATE TABLE dbo.TRACE_FIX_MESSAGES_LOG (
-  id                INT IDENTITY(1,1) NOT NULL,
-  time              DATETIME NOT NULL,
-  beginstring       CHAR(8) NOT NULL,
-  sendercompid      VARCHAR(64) NOT NULL,
-  sendersubid       VARCHAR(64) NOT NULL,
-  senderlocid       VARCHAR(64) NOT NULL,
-  targetcompid      VARCHAR(64) NOT NULL,
-  targetsubid       VARCHAR(64) NOT NULL,
-  targetlocid       VARCHAR(64) NOT NULL,
-  session_qualifier VARCHAR(64) NULL,
-  text              NVARCHAR(MAX) NOT NULL,
+  id                 INT IDENTITY(1,1) NOT NULL,
+  time               DATETIME NOT NULL,
+  beginstring        CHAR(8) NOT NULL,
+  sendercompid       VARCHAR(64) NOT NULL,
+  sendersubid        VARCHAR(64) NOT NULL,
+  senderlocid        VARCHAR(64) NOT NULL,
+  targetcompid       VARCHAR(64) NOT NULL,
+  targetsubid        VARCHAR(64) NOT NULL,
+  targetlocid        VARCHAR(64) NOT NULL,
+  session_qualifier  VARCHAR(64) NULL,
+  text               NVARCHAR(MAX) NOT NULL,
+  MessageTypeTag     VARCHAR(3) NOT NULL DEFAULT '',
+  MessageType        VARCHAR(100) NULL,
+  TraceTradeReportID VARCHAR(20) NULL,
+  msgseqnum          INT NOT NULL DEFAULT 0,
   PRIMARY KEY (id)
 );
 CREATE INDEX idx_trace_fix_messages_log_time ON dbo.TRACE_FIX_MESSAGES_LOG(time);

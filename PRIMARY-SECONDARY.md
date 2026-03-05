@@ -19,6 +19,8 @@ This document describes how the **Primary** and **Secondary (Backup)** simulator
 - Primary and Secondary use the **same** SessionID in config, so they both read/write the **same** row in `TRACE_FIX_SESSIONS` and the same message rows in `TRACE_FIX_MESSAGES`.
 - When the **initiator (gateway)** connects to **Primary**, Primary’s acceptor owns that TCP connection and uses the shared DB for incoming/outgoing seq nums. When Primary goes down and the initiator reconnects to **Secondary**, Secondary’s acceptor gets the connection and loads the **same** session state (incoming_seqnum, outgoing_seqnum) from the DB. So **sequence numbers continue** across failover—no reset, FINRA-style.
 
+**On Logon (whichever is active — Primary or Secondary):** The simulator must (1) check the database and load session state from `TRACE_FIX_SESSIONS`, (2) use the expected seq from DB (`incoming_seqnum`) so we do not assume 1 after restart, (3) if there is a gap (incoming MsgSeqNum > expected), send ResendRequest for the missing range and wait for the initiator to resend, (4) otherwise accept the Logon and continue. This is achieved with **UseJdbcStore=Y** and **RefreshOnLogon=Y**; QuickFIX/J then sends ResendRequest automatically when it detects a gap.
+
 ---
 
 ## 3. What to run

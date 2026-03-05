@@ -8,6 +8,8 @@ Database: **trace_fix** (SQL Server). Schema scripts: `src/main/resources/sql/`.
 
 All inserts into these four tables are performed by **QuickFIX/J** (JdbcStore / JdbcLog), not by application code. The simulator only provides the DataSource and config (table names, JDBC URL, etc.).
 
+**Which simulator (Primary vs Secondary)?** Each table has a **simulator_instance** column (e.g. `FixSimulator-Primary` or `FixSimulator-Secondary`). The simulator sets the JDBC connection’s application name from config `SimulatorRole`; SQL Server triggers populate `simulator_instance` from that on INSERT. Run `sql/quickfixj_sqlserver_add_simulator_instance.sql` on an existing DB to add the column and triggers.
+
 | Table | Config key | Purpose | When rows are inserted | Where (code) |
 |-------|------------|---------|-------------------------|--------------|
 | **TRACE_FIX_SESSIONS** | `JdbcStoreSessionsTableName` | Session state and sequence numbers | On session creation; updated on every sent/received message (seq nums) | QuickFIX/J `JdbcStore` (session store) |
@@ -37,6 +39,7 @@ All inserts into these four tables are performed by **QuickFIX/J** (JdbcStore / 
 | creation_time | When the session row was created |
 | incoming_seqnum | Next expected incoming sequence number |
 | outgoing_seqnum | Next outgoing sequence number |
+| simulator_instance | Set by trigger: `FixSimulator-Primary` or `FixSimulator-Secondary` (which simulator inserted the row) |
 
 **Where in our code:** We only pass `SessionSettings` and (optionally) a DataSource to `JdbcStoreFactory`. The actual INSERT/UPDATE is inside QuickFIX/J (`quickfix.JdbcStore` or equivalent).
 
@@ -55,10 +58,13 @@ All inserts into these four tables are performed by **QuickFIX/J** (JdbcStore / 
 | beginstring, sendercompid, sendersubid, senderlocid, targetcompid, targetsubid, targetlocid, session_qualifier | Session key (same as sessions table) |
 | msgseqnum | Message sequence number (34) |
 | message | Full FIX message string |
+| simulator_instance | Set by trigger: `FixSimulator-Primary` or `FixSimulator-Secondary` |
 
 **When:** On every application and admin message send/receive (when using JDBC store).
 
 **Where:** QuickFIX/J message store implementation.
+
+**Why Secondary had no rows (and the fix):** QuickFIX/J does **INSERT only**. The table has a composite primary key (session + msgseqnum). When the initiator fails over to Secondary, Secondary uses the same session and sequence numbers; when it tries to INSERT a row that Primary already wrote (same session + msgseqnum), the INSERT fails with a **duplicate key** and no Secondary row appears. The fix is an **INSTEAD OF INSERT** trigger on `TRACE_FIX_MESSAGES` that runs a **MERGE**: if the row exists, UPDATE message and `simulator_instance`; otherwise INSERT. Then both Primary and Secondary succeed. **Existing databases:** run `sql/quickfixj_sqlserver_trace_fix_messages_upsert_trigger.sql` once to replace the old trigger with the upsert trigger. New installs (full schema) already create this trigger.
 
 ---
 
@@ -76,6 +82,13 @@ All inserts into these four tables are performed by **QuickFIX/J** (JdbcStore / 
 | time | When the message was logged |
 | beginstring, sendercompid, sendersubid, senderlocid, targetcompid, targetsubid, targetlocid, session_qualifier | Session identification |
 | text | Raw FIX message string |
+| simulator_instance | Set by trigger: `FixSimulator-Primary` or `FixSimulator-Secondary` |
+| MessageTypeTag | FIX tag 35 value (e.g. AE, 0, A). **Populated by trigger** `tr_TRACE_FIX_MESSAGES_LOG_parse_fix` from `text`. VARCHAR(3) NOT NULL, default ''. |
+| MessageType | Human-readable name for tag 35 (e.g. Trade Report, Heartbeat, Logon). **Populated by trigger**. VARCHAR(100) NULL. |
+| TraceTradeReportID | FIX tag 571 value (e.g. 571=SP20260304000113:18 → SP20260304000113:18). **Populated by trigger**. VARCHAR(20) NULL. |
+| msgseqnum | FIX tag 34 (MsgSeqNum). **Populated by trigger**. INT NOT NULL, default 0. |
+
+**MessageTypeTag / MessageType / TraceTradeReportID / msgseqnum:** QuickFIX/J does not write these; the **AFTER INSERT** trigger `tr_TRACE_FIX_MESSAGES_LOG_parse_fix` parses the raw `text` (FIX message, SOH-delimited), extracts tag 35 → MessageTypeTag and MessageType, tag 571 → TraceTradeReportID, tag 34 → msgseqnum, and updates the row. The same trigger also sets **sendercompid** (49), **targetcompid** (56), **sendersubid** (50), **targetsubid** (57) from the message body so the stored row reflects the FIX tags (same mapping for 49=FNRA and 49≠FNRA). **Existing DBs:** run `sql/quickfixj_sqlserver_trace_fix_messages_log_enhance.sql` to add the columns and trigger. New installs (full schema) already include them.
 
 **When:** Every incoming and outgoing message that is logged (e.g. all app messages; heartbeats only if JdbcLogHeartBeats=Y).
 
@@ -97,6 +110,7 @@ All inserts into these four tables are performed by **QuickFIX/J** (JdbcStore / 
 | time | Event time |
 | beginstring, sendercompid, sendersubid, senderlocid, targetcompid, targetsubid, targetlocid, session_qualifier | Session identification |
 | text | Event description / message |
+| simulator_instance | Set by trigger: `FixSimulator-Primary` or `FixSimulator-Secondary` |
 
 **When:** On session lifecycle and connection events.
 
@@ -104,13 +118,38 @@ All inserts into these four tables are performed by **QuickFIX/J** (JdbcStore / 
 
 ---
 
-## 5. TRACE_LIFECYCLE_STATE (defined but not used for inserts by current code)
+## 5. TRACE_LIFECYCLE_STATE
 
 **Defined in:** `sql/trace_lifecycle_state_table.sql`
 
-**Purpose (per schema comment):** Lifecycle state for FINRA TS compliance (per TradeReportID/session).
+**Purpose:** Lifecycle state for FINRA TS compliance (per TradeReportID/session). Shared by Primary and Secondary so state is preserved when the initiator switches.
 
-**Current app behavior:** The simulator uses `InMemoryLifecycleStore` only (`CompliancePipeline` → `LifecycleEngine` → `InMemoryLifecycleStore`). There is **no JDBC implementation** of `LifecycleStateStore`, so **no inserts** into `TRACE_LIFECYCLE_STATE` happen in the current codebase. The table exists for potential future use or external tooling.
+**Insert/update:** When the simulator uses a DB (same DataSource as for JdbcStore/JdbcLog), it uses **JdbcLifecycleStore** and writes to `TRACE_LIFECYCLE_STATE` on each lifecycle transition (e.g. NEW_SUBMITTED, ACCEPTED, CORRECTED). When no DB is configured, it uses **InMemoryLifecycleStore** and this table is not updated.
+
+**Where:** `CompliancePipeline` → `LifecycleEngine` → `LifecycleStateStore` (JdbcLifecycleStore or InMemoryLifecycleStore). Simulator creates the store and passes it into `WizFixApplication`.
+
+---
+
+## Primary / Secondary switch: how the five tables are updated
+
+When you switch from Primary to Secondary (or vice versa), the **active** simulator instance (the one the initiator is connected to) is the one that writes to the database. All five tables use the **same database** (same `JdbcURL` in both configs).
+
+| Table | Who writes | When updated |
+|-------|------------|--------------|
+| **TRACE_FIX_SESSIONS** | QuickFIX/J JdbcStore | Session creation; seq nums on every message. **Active** instance (Primary or Secondary) updates. |
+| **TRACE_FIX_MESSAGES** | QuickFIX/J JdbcStore | Every message sent/received. **Active** instance inserts. |
+| **TRACE_FIX_MESSAGES_LOG** | QuickFIX/J JdbcLog | Every incoming/outgoing message (when LogToDB=Y). **Active** instance inserts. |
+| **TRACE_FIX_EVENT_LOG** | QuickFIX/J JdbcLog | Logon, logout, connection events. **Active** instance inserts. |
+| **TRACE_LIFECYCLE_STATE** | Simulator (JdbcLifecycleStore) | Lifecycle transitions (trade state). **Active** instance inserts/updates. |
+
+**Requirements so all five tables are updated when you switch:**
+
+1. **Same DB for both:** Primary and Secondary configs must use the same `JdbcURL`, `JdbcUser`, `JdbcPassword`, and table names.
+2. **UseJdbcStore=Y** and **LogToDB=Y** in both configs (so TRACE_FIX_SESSIONS, TRACE_FIX_MESSAGES, TRACE_FIX_MESSAGES_LOG, TRACE_FIX_EVENT_LOG are written by the engine).
+3. **Schema validation must pass** on startup for the instance you run. If the instance falls back to file store (log: "JDBC store schema invalid … Falling back to file store"), that instance will **not** update TRACE_FIX_SESSIONS or TRACE_FIX_MESSAGES. Ensure the DB is reachable and `sql/quickfixj_sqlserver_schema.sql` (and `sql/trace_lifecycle_state_table.sql`) have been run.
+4. **TRACE_LIFECYCLE_STATE** is written whenever the simulator has a DataSource (i.e. when LogToDB=Y or UseJdbcStore=Y); no extra config. Startup log: "Using JDBC lifecycle store — TRACE_LIFECYCLE_STATE will be updated (shared by Primary/Secondary)."
+
+**simulator_instance:** Each table has a `simulator_instance` column (e.g. `FixSimulator-Primary`, `FixSimulator-Secondary`) so you can see which instance wrote each row.
 
 ---
 

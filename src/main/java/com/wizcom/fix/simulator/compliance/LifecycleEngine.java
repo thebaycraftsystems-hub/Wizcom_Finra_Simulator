@@ -20,7 +20,7 @@ public class LifecycleEngine {
     }
 
     /**
-     * Evaluate transition for incoming TradeCaptureReport. Returns fail if transition invalid.
+     * Evaluate transition for incoming TradeCaptureReport. Never reject (only reject when 31 > 10000 in SpecValidationEngine).
      */
     public ValidationResult evaluateAndTransition(TradeCaptureReport msg, SessionID sessionID) {
         try {
@@ -29,26 +29,14 @@ public class LifecycleEngine {
             LifecycleState current = store.get(tradeReportId, sessionID);
 
             if (transType == 0) {
-                if (current == LifecycleState.DNR) {
-                    return ValidationResult.fail(4063, "DNR - SECOND NEW NOT ALLOWED");
-                }
-                if (current == LifecycleState.NEW_SUBMITTED || current == LifecycleState.ACCEPTED) {
-                    return ValidationResult.fail(4053, "DUPLICATE TRADE REPORT ID");
-                }
                 store.put(tradeReportId, sessionID, LifecycleState.NEW_SUBMITTED);
                 return ValidationResult.ok();
             }
             if (transType == 2) {
-                if (current != LifecycleState.ACCEPTED && current != LifecycleState.NEW_SUBMITTED) {
-                    return ValidationResult.fail(4064, "CORRECTION ONLY AFTER ACCEPTED NEW");
-                }
                 store.put(tradeReportId, sessionID, LifecycleState.CORRECTED);
                 return ValidationResult.ok();
             }
             if (transType == 1) {
-                if (current == null) {
-                    return ValidationResult.fail(4055, "INVALID LIFECYCLE TRANSITION");
-                }
                 store.put(tradeReportId, sessionID, LifecycleState.CANCELLED);
                 return ValidationResult.ok();
             }
@@ -58,8 +46,8 @@ public class LifecycleEngine {
             }
             return ValidationResult.ok();
         } catch (FieldNotFound e) {
-            log.debug("Lifecycle field missing: {}", e.getMessage());
-            return ValidationResult.fail(4058, "MISSING REQUIRED FIELD");
+            log.debug("Lifecycle field missing: {} — not rejecting.", e.getMessage());
+            return ValidationResult.ok();
         }
     }
 

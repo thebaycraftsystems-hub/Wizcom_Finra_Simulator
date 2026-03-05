@@ -17,6 +17,9 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import com.wizcom.fix.simulator.compliance.InMemoryLifecycleStore;
+import com.wizcom.fix.simulator.compliance.JdbcLifecycleStore;
+import com.wizcom.fix.simulator.compliance.LifecycleStateStore;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
@@ -37,9 +40,12 @@ import quickfix.MessageFactory;
 import quickfix.MessageStoreFactory;
 import quickfix.RuntimeError;
 import quickfix.ScreenLogFactory;
+import quickfix.Session;
 import quickfix.SessionID;
 import quickfix.SessionSettings;
 import quickfix.SocketAcceptor;
+import quickfix.field.Text;
+import quickfix.fix44.Logout;
 import quickfix.mina.acceptor.DynamicAcceptorSessionProvider;
 import quickfix.mina.acceptor.DynamicAcceptorSessionProvider.TemplateMapping;
 
@@ -58,6 +64,10 @@ public class Simulator {
 	/** HikariCP DataSource when DB is used; held for clean shutdown. */
 	private final HikariDataSource jdbcDataSource;
 	private volatile boolean stopped;
+	/** When true, send Logout to initiator on shutdown (SendLogout_at_Shutdown=Y). */
+	private final boolean sendLogoutAtShutdown;
+	/** Stored for shutdown: send Logout to configured sessions. */
+	private final SessionSettings sessionSettings;
 
     private final JmxExporter jmxExporter;
     private final ObjectName connectorObjectName;
@@ -73,29 +83,63 @@ public class Simulator {
     	try {
     	    if (settings.isSetting("SimulatorRole")) role = settings.getString("SimulatorRole").toUpperCase();
     	} catch (Exception ignored) {}
-    	log.info("*************************************************************************************");
-    	log.info("* WELCOME TO WIZCOM FIX SIMULATOR — Role: {} ", role);
-    	log.info("* Version [6.0.0]");
-    	log.info("*************************************************************************************");
-    	System.out.println("WELCOME TO WIZCOM FIX SIMULATOR — Role: " + role + "\nVersion 6.0.0");
+    	// Big banner so you can easily see Primary vs Secondary when switching
+    	String bannerLine = "################################################################################";
+    	String blankLine   = "##                                                                              ##";
+    	String switchLine  = "##            >>>>>  SWITCHED TO " + role + "  <<<<<                               ##";
+    	String runLine     = "##            FINRA Simulator now running as " + role + "                          ##";
+    	log.warn(bannerLine);
+    	log.warn(blankLine);
+    	log.warn(switchLine);
+    	log.warn(runLine);
+    	log.warn(blankLine);
+    	log.warn(bannerLine);
+    	System.out.println("\n" + bannerLine + "\n" + blankLine + "\n" + switchLine + "\n" + runLine + "\n" + blankLine + "\n" + bannerLine + "\n");
+    	log.info("WELCOME TO WIZCOM FIX SIMULATOR — Role: {} | Version [6.0.0]", role);
+    	System.out.println("WELCOME TO WIZCOM FIX SIMULATOR — Role: " + role + " | Version 6.0.0");
     	
-    	WizFixApplication wizFixApplication = new WizFixApplication(settings, configResourceName);
         boolean logToFile = false;
         boolean logToDB = false;
         boolean logToScreen = false;
         boolean useJdbcStore = false;
+        boolean sendLogoutAtShutdownConfig = false;
         try {
             logToFile = settings.getBool("LogToFile");
             logToDB = settings.getBool("LogToDB");
             logToScreen = settings.getBool("LogToScreen");
             useJdbcStore = settings.getBool("UseJdbcStore");
+            if (settings.isSetting("SendLogout_at_Shutdown")) {
+                sendLogoutAtShutdownConfig = settings.getBool("SendLogout_at_Shutdown");
+            }
         } catch (FieldConvertError ex) {}
+        this.sendLogoutAtShutdown = sendLogoutAtShutdownConfig;
+        this.sessionSettings = settings;
 
         // Use HikariCP DataSource when DB is enabled to avoid Proxool + signed SQL Server driver conflict
         jdbcDataSource = (useJdbcStore || logToDB) ? createJdbcDataSource(settings) : null;
         if (useJdbcStore && jdbcDataSource != null && !isJdbcStoreSchemaValid(jdbcDataSource, settings)) {
-            log.warn("JDBC store schema invalid (e.g. missing senderlocid/targetlocid). Run sql/quickfixj_sqlserver_schema.sql in trace_fix. Falling back to file store.");
+            log.warn("JDBC store schema invalid (e.g. missing senderlocid/targetlocid or DB unreachable). Run sql/quickfixj_sqlserver_schema.sql. Falling back to file store — TRACE_FIX_MESSAGES and TRACE_FIX_SESSIONS will NOT be updated by this instance.");
             useJdbcStore = false;
+        }
+        LifecycleStateStore lifecycleStore = (jdbcDataSource != null) ? new JdbcLifecycleStore(jdbcDataSource) : new InMemoryLifecycleStore();
+        if (lifecycleStore instanceof JdbcLifecycleStore) {
+            log.info("Using JDBC lifecycle store — TRACE_LIFECYCLE_STATE will be updated (shared by Primary/Secondary).");
+        }
+        WizFixApplication wizFixApplication = new WizFixApplication(settings, configResourceName, lifecycleStore);
+        if (useJdbcStore && jdbcDataSource != null) {
+            String sessionsTable = "TRACE_FIX_SESSIONS";
+            java.time.ZoneId sessionDateZone = java.time.ZoneId.of("America/New_York");
+            try {
+                SessionID any = getFirstSessionId(settings);
+                if (settings.isSetting(any, "JdbcStoreSessionsTableName")) {
+                    sessionsTable = settings.getString(any, "JdbcStoreSessionsTableName");
+                }
+                if (settings.isSetting(any, "SessionDateZone")) {
+                    sessionDateZone = java.time.ZoneId.of(settings.getString(any, "SessionDateZone").trim());
+                }
+            } catch (Exception ignored) { }
+            wizFixApplication.setSessionSequenceFromDB(new SessionSequenceFromDB(jdbcDataSource, sessionsTable, sessionDateZone));
+            resetSequenceOnStartIfConfigured(settings, jdbcDataSource, sessionsTable);
         }
 		MessageStoreFactory messageStoreFactory = createMessageStoreFactory(settings, useJdbcStore, jdbcDataSource);
 
@@ -135,6 +179,18 @@ public class Simulator {
     private HikariDataSource createJdbcDataSource(SessionSettings settings) throws ConfigError, FieldConvertError {
         SessionID anySession = getFirstSessionId(settings);
         String url = settings.getString(anySession, "JdbcURL");
+        // Tag this connection so DB triggers can record Primary vs Secondary (simulator_instance column)
+        String role = "Primary";
+        try {
+            if (settings.isSetting(anySession, "SimulatorRole")) {
+                role = settings.getString(anySession, "SimulatorRole").trim();
+            }
+        } catch (Exception ignored) {}
+        if (role.isEmpty()) role = "Primary";
+        if (!url.toLowerCase().contains("applicationname=")) {
+            url = url + ";applicationName=FixSimulator-" + role;
+            log.info("JDBC applicationName set to FixSimulator-{} for DB simulator_instance tracking", role);
+        }
         String user = settings.getString(anySession, "JdbcUser");
         String password = settings.getString(anySession, "JdbcPassword");
         String driverClassName = settings.getString(anySession, "JdbcDriver");
@@ -155,6 +211,29 @@ public class Simulator {
             throw new ConfigError("At least one [SESSION] or [DEFAULT] required for JDBC settings");
         }
         return it.next();
+    }
+
+    /**
+     * When ResetSequenceOnStart=Y in [default], resets all rows in the sessions table to incoming_seqnum=1, outgoing_seqnum=1
+     * so the simulator starts with sequence 1 (fresh data). Use for clean start / testing.
+     */
+    private void resetSequenceOnStartIfConfigured(SessionSettings settings, DataSource dataSource, String sessionsTableName) {
+        boolean reset = false;
+        try {
+            SessionID any = getFirstSessionId(settings);
+            if (settings.isSetting(any, "ResetSequenceOnStart")) {
+                reset = settings.getBool(any, "ResetSequenceOnStart");
+            }
+        } catch (Exception ignored) { }
+        if (!reset || dataSource == null || sessionsTableName == null || sessionsTableName.isEmpty()) {
+            return;
+        }
+        try (Connection conn = dataSource.getConnection(); Statement st = conn.createStatement()) {
+            int updated = st.executeUpdate("UPDATE " + sessionsTableName + " SET incoming_seqnum = 1, outgoing_seqnum = 1");
+            log.info("ResetSequenceOnStart=Y: set incoming_seqnum and outgoing_seqnum to 1 for {} row(s) in {}", updated, sessionsTableName);
+        } catch (SQLException e) {
+            log.warn("ResetSequenceOnStart=Y but failed to reset {}: {}", sessionsTableName, e.getMessage());
+        }
     }
 
     private LogFactory createJdbcLogFactory(SessionSettings settings, boolean logToDB, DataSource dataSource) {
@@ -189,7 +268,7 @@ public class Simulator {
             st.executeQuery("SELECT TOP 1 senderlocid, targetlocid FROM " + messagesTable + " WHERE 1=0");
             return true;
         } catch (SQLException e) {
-            log.debug("JDBC store schema check failed: {}", e.getMessage());
+            log.warn("JDBC store schema check failed for {} / {}: {} — check DB reachability and run sql/quickfixj_sqlserver_schema.sql.", sessionsTable, messagesTable, e.getMessage());
             return false;
         }
     }
@@ -202,7 +281,7 @@ public class Simulator {
      */
     private MessageStoreFactory createMessageStoreFactory(SessionSettings settings, boolean useJdbcStore, DataSource dataSource) throws ConfigError, FieldConvertError {
         if (useJdbcStore) {
-            log.info("Using JDBC message store (sessions and messages in database)");
+            log.info("Using JDBC message store — TRACE_FIX_SESSIONS and TRACE_FIX_MESSAGES will be updated on each message.");
             JdbcStoreFactory factory = new JdbcStoreFactory(settings);
             if (dataSource != null) {
                 factory.setDataSource(dataSource);
@@ -258,6 +337,48 @@ public class Simulator {
     }
 
     /**
+     * Sends Logout (35=5) to all logged-on sessions when SendLogout_at_Shutdown=Y.
+     */
+    private void sendLogoutToAllSessions() {
+        if (sessionSettings == null) {
+            log.info("SendLogout_at_Shutdown=Y: no settings, skipping Logout.");
+            return;
+        }
+        try {
+            Iterator<SessionID> it = sessionSettings.sectionIterator();
+            int sent = 0;
+            while (it.hasNext()) {
+                SessionID sessionID = it.next();
+                try {
+                    Session session = Session.lookupSession(sessionID);
+                    if (session != null && session.isLoggedOn()) {
+                        Logout logout = new Logout();
+                        logout.setField(new Text("Simulator shutting down"));
+                        Session.sendToTarget(logout, sessionID);
+                        sent++;
+                        log.info("SendLogout_at_Shutdown=Y: sent Logout to initiator for session {}", sessionID);
+                    }
+                } catch (Exception e) {
+                    log.debug("Could not send Logout to {}: {}", sessionID, e.getMessage());
+                }
+            }
+            if (sent == 0) {
+                log.info("SendLogout_at_Shutdown=Y: no logged-on sessions to send Logout.");
+            }
+            if (sent > 0) {
+                try {
+                    Thread.sleep(1500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                log.info("SendLogout_at_Shutdown=Y: sent Logout to {} session(s), waiting 1.5s before stop.", sent);
+            }
+        } catch (Exception e) {
+            log.warn("SendLogout_at_Shutdown: could not send Logout to sessions: {}", e.getMessage());
+        }
+    }
+
+    /**
      * Stops the acceptor and closes the connection pool so the JVM can exit cleanly
      * (avoids lingering threads and IllegalThreadStateException when run via exec:java).
      * Safe to call multiple times.
@@ -273,6 +394,11 @@ public class Simulator {
             stopped = true;
         }
         log.info("Shutting down FIX Simulator...");
+        if (sendLogoutAtShutdown) {
+            sendLogoutToAllSessions();
+        } else {
+            log.info("SendLogout_at_Shutdown=N: not sending Logout to initiator.");
+        }
         try {
             jmxExporter.getMBeanServer().unregisterMBean(connectorObjectName);
         } catch (Exception e) {
@@ -392,7 +518,8 @@ public class Simulator {
             System.err.println("Configuration file not found. Usage: java -jar fix-simulator.jar [primary|secondary|<path-to.cfg>]");
             System.exit(1);
         }
-        log.info("Loading config from {} — {}", source, (args.length > 0 && (args[0].equalsIgnoreCase("secondary") || args[0].equalsIgnoreCase("--secondary")) ? "SECONDARY" : "PRIMARY");
+        String roleLabel = (args.length > 0 && (args[0].equalsIgnoreCase("secondary") || args[0].equalsIgnoreCase("--secondary"))) ? "SECONDARY" : "PRIMARY";
+        log.info("Loading config from {} - {}", source, roleLabel);
         return inputStream;
     }
 }

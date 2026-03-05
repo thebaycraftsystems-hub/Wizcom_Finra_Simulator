@@ -146,11 +146,24 @@
 
 	<build>
 		<plugins>
+			<!-- Do not fail build when target is locked (e.g. fix-simulator.jar in use); stop simulator before clean for a full clean. -->
 			<plugin>
-				<artifactId>maven-shade-plugin</artifactId>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-clean-plugin</artifactId>
+				<version>3.3.2</version>
+				<configuration>
+					<failOnError>false</failOnError>
+				</configuration>
 			</plugin>
 			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-shade-plugin</artifactId>
+				<version>3.5.1</version>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-source-plugin</artifactId>
+				<version>3.3.0</version>
 			</plugin>
 			
 			<!-- download source code in Eclipse, best practice -->
