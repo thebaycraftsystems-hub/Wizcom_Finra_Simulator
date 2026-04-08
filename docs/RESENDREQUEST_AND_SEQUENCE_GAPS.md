@@ -86,6 +86,17 @@ Then restart the simulator (or leave it running; RefreshOnLogon loads on next Lo
 
 **On receiving Logon: fetch max sequence from DB (current date only) and check if sequence numbers are missing:** When **UseJdbcStore=Y**, the simulator on each **Logon** (in `fromAdmin`) fetches the session row from `TRACE_FIX_SESSIONS` (incoming_seqnum, outgoing_seqnum, creation_time). It uses the row **only when creation_time is on the current date** (in the configured session date time zone, default America/New_York), so max sequence is always **as of that day**. It then: (1) uses the **max** of (Logon MsgSeqNum+1) and DB incoming_seqnum as the next expected incoming sequence, and sets it via [Session.setNextTargetMsgSeqNum](https://www.quickfixj.org/javadoc/2.3.0/quickfix/Session.html#setNextTargetMsgSeqNum-int-); (2) sets next sender sequence from DB via [Session.setNextSenderMsgSeqNum](https://www.quickfixj.org/javadoc/2.3.0/quickfix/Session.html#setNextSenderMsgSeqNum-int-) so the store/DB remains the source of truth; (3) if the initiator sent a higher MsgSeqNum than we had in DB (logonMsgSeqNum > db incoming_seqnum), logs that sequence numbers were missing (the engine will have sent ResendRequest for the gap when configured). This aligns with the [QuickFIX/J 2.3.0 Session](https://www.quickfixj.org/javadoc/2.3.0/quickfix/Session.html) and MessageStore API.
 
+### 3d. Logout and Logon with same MsgSeqNum in TRACE_FIX_MESSAGES_LOG (34=N for both)
+
+**What you see:** In `TRACE_FIX_MESSAGES_LOG`, the simulator (49=FNRA) sends Logout with 34=233 and later sends Logon with 34=233. You expect Logon to have 34=234 (incremented by 1).
+
+**Why:** (1) **SendLogout_at_Shutdown=Y:** The simulator sends Logout and then the process exits; the JdbcStore may not flush the incremented sequence to `TRACE_FIX_SESSIONS` before exit, so the next run loads 233 and sends Logon with 233 again. (2) **SendLogout_at_Shutdown=N:** The initiator disconnects (with or without sending Logout). If the initiator sends Logout, we never persisted 234. If the initiator just drops, we load from DB (possibly stale 233) and may reuse 233 for the next Logon.
+
+**Fix (simulator):** When **UseJdbcStore=Y**:
+
+- **SendLogout_at_Shutdown=Y:** After sending each Logout, the simulator writes next sender (current from DB + 1) to `TRACE_FIX_SESSIONS.outgoing_seqnum` so after restart the next Logon uses 34=(N+1). See `Simulator.sendLogoutToAllSessions()`.
+- **SendLogout_at_Shutdown=N:** (1) When we **receive** Logout from the initiator, we persist next sender = engine’s current + 1 so the next Logon uses 34=(N+1). (2) On **Logon**, we use the **max** of (DB value, engine’s current next sender) so we never send a lower seq when the initiator reconnects without us having sent Logout (same process, session still in memory). See `WizFixApplication.fromAdmin` (Logout 35=5 and Logon 35=A).
+
 ### 4. When the initiator sends a sequence reset (ResetSeqNumFlag 141=Y)
 
 If the **initiator** sends a Logon with **ResetSeqNumFlag(141)=Y**, it is requesting a sequence number reset: both sides should set their sequence numbers back to 1 and continue from there.

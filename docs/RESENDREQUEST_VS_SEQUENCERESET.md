@@ -83,3 +83,21 @@ This document aligns with the [QuickFIX/J 2.3.0 API](https://www.quickfixj.org/j
 - **Session.setNextSenderMsgSeqNum(int):** We use this in `fromAdmin` after receiving a full SequenceReset: we set next outgoing to **NewSeqNo+1** (NewSeqNo read from the message; nothing hardcoded). The underlying store (and thus DB) is updated by the engine.
 
 Logic in the codebase (config + `WizFixApplication.fromAdmin`) is consistent with the QuickFIX/J 2.3.0 Session and MessageStore behavior described above.
+
+---
+
+## 5. Simulator behavior checklist — working as designed
+
+Yes. The simulator is implemented to behave as required for ResendRequest and sequence reset. Summary:
+
+| Behavior | Who does it | Simulator status |
+|----------|-------------|------------------|
+| **Send ResendRequest** | QuickFIX/J engine | ✅ Engine sends ResendRequest when incoming MsgSeqNum &gt; expected. Config: `RefreshOnLogon=Y` (load expected from DB on Logon so we don’t spuriously request 1..N-1), `SendRedundantResendRequests=Y` (can send another ResendRequest for same gap if first didn’t get filled). |
+| **Receive ResendRequest** | QuickFIX/J engine + MessageStore | ✅ When the initiator sends ResendRequest(7, 16), the engine uses `MessageStore.get(7, 16, messages)` and resends those messages (with PossDupFlag=Y, etc.). With `UseJdbcStore=Y`, JdbcStore reads from `TRACE_FIX_MESSAGES` and resends. No application code in `WizFixApplication` for 35=2. |
+| **Receive SequenceReset (35=4)** | WizFixApplication.fromAdmin + engine | ✅ On full reset (GapFillFlag 123=N or absent), we set next sender to **NewSeqNo+1** via `Session.setNextSenderMsgSeqNum`. Engine updates expected incoming; we align our outgoing. DB updated via store. |
+| **Send SequenceReset (35=4)** | WizFixApplication.toAdmin + engine | ✅ Before sending a full SequenceReset we set next sender to **NewSeqNo+1** so the next message we send uses that value. |
+| **Logon ResetSeqNumFlag (141=Y)** | QuickFIX/J | ✅ With `ResetOnLogon=N` we do not auto-reset; we **honor** the initiator’s 141=Y (engine resets and persists via store). |
+| **Logon sequence alignment** | WizFixApplication.fromAdmin | ✅ On Logon we set next expected from initiator (789), next sender from DB or 789 or “fresh day” (1), and handle “initiator behind” so we don’t send a high seq when they sent 34=1. |
+| **Logout 58 “expecting N”** | WizFixApplication.fromAdmin | ✅ We parse Logout(58) and set next sender to N (and persist to DB) so the next Logon uses 34=N. |
+
+**Requirements for resend/reset to work:** `UseJdbcStore=Y` (so session and messages are in DB for refresh and resend), `RefreshOnLogon=Y`, and a valid DB schema so the engine does not fall back to file store. With that, sending/receiving ResendRequest and sequence reset handling work as designed.

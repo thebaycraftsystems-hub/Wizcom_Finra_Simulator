@@ -72,7 +72,7 @@ All inserts into these four tables are performed by **QuickFIX/J** (JdbcStore / 
 
 **Used when:** `LogToDB=Y`. Same table name is used for both incoming and outgoing (config: `JdbcLogIncomingTable` and `JdbcLogOutgoingTable` both point to `TRACE_FIX_MESSAGES_LOG`).
 
-**Insert:** One row per incoming or outgoing FIX message (optionally excluding heartbeats if `JdbcLogHeartBeats=N`).
+**Insert:** One row per incoming or outgoing FIX message. The project config sets `JdbcLogHeartBeats=Y` so Heartbeats (35=0) are also written to this table; set `JdbcLogHeartBeats=N` in config to exclude heartbeats.
 
 **Columns:**
 
@@ -90,7 +90,7 @@ All inserts into these four tables are performed by **QuickFIX/J** (JdbcStore / 
 
 **MessageTypeTag / MessageType / TraceTradeReportID / msgseqnum:** QuickFIX/J does not write these; the **AFTER INSERT** trigger `tr_TRACE_FIX_MESSAGES_LOG_parse_fix` parses the raw `text` (FIX message, SOH-delimited), extracts tag 35 → MessageTypeTag and MessageType, tag 571 → TraceTradeReportID, tag 34 → msgseqnum, and updates the row. The same trigger also sets **sendercompid** (49), **targetcompid** (56), **sendersubid** (50), **targetsubid** (57) from the message body so the stored row reflects the FIX tags (same mapping for 49=FNRA and 49≠FNRA). **Existing DBs:** run `sql/quickfixj_sqlserver_trace_fix_messages_log_enhance.sql` to add the columns and trigger. New installs (full schema) already include them.
 
-**When:** Every incoming and outgoing message that is logged (e.g. all app messages; heartbeats only if JdbcLogHeartBeats=Y).
+**When:** Every incoming and outgoing message that is logged (all app/admin messages and heartbeats when `JdbcLogHeartBeats=Y`, which is set in the project config).
 
 **Where:** QuickFIX/J `JdbcLog` (used as the log backend when we add `createJdbcLogFactory(...)` to the composite log factory in `Simulator.java`).
 

@@ -68,6 +68,8 @@ public class Simulator {
 	private final boolean sendLogoutAtShutdown;
 	/** Stored for shutdown: send Logout to configured sessions. */
 	private final SessionSettings sessionSettings;
+	/** When non-null (UseJdbcStore=Y), used after sending Logout at shutdown to persist next sender seq so next Logon uses N+1. */
+	private final SessionSequenceFromDB sessionSequenceFromDB;
 
     private final JmxExporter jmxExporter;
     private final ObjectName connectorObjectName;
@@ -83,6 +85,9 @@ public class Simulator {
     	try {
     	    if (settings.isSetting("SimulatorRole")) role = settings.getString("SimulatorRole").toUpperCase();
     	} catch (Exception ignored) {}
+    	// So every log line in logs/simulator.log (and console) shows Primary or Secondary
+    	String instanceLabel = ("PRIMARY".equals(role) ? "Primary" : "Secondary");
+    	com.wizcom.fix.simulator.SimulatorInstanceHolder.set(instanceLabel);
     	// Big banner so you can easily see Primary vs Secondary when switching
     	String bannerLine = "################################################################################";
     	String blankLine   = "##                                                                              ##";
@@ -126,6 +131,7 @@ public class Simulator {
             log.info("Using JDBC lifecycle store — TRACE_LIFECYCLE_STATE will be updated (shared by Primary/Secondary).");
         }
         WizFixApplication wizFixApplication = new WizFixApplication(settings, configResourceName, lifecycleStore);
+        SessionSequenceFromDB sessionSequenceFromDBInstance = null;
         if (useJdbcStore && jdbcDataSource != null) {
             String sessionsTable = "TRACE_FIX_SESSIONS";
             java.time.ZoneId sessionDateZone = java.time.ZoneId.of("America/New_York");
@@ -138,9 +144,11 @@ public class Simulator {
                     sessionDateZone = java.time.ZoneId.of(settings.getString(any, "SessionDateZone").trim());
                 }
             } catch (Exception ignored) { }
-            wizFixApplication.setSessionSequenceFromDB(new SessionSequenceFromDB(jdbcDataSource, sessionsTable, sessionDateZone));
+            sessionSequenceFromDBInstance = new SessionSequenceFromDB(jdbcDataSource, sessionsTable, sessionDateZone);
+            wizFixApplication.setSessionSequenceFromDB(sessionSequenceFromDBInstance);
             resetSequenceOnStartIfConfigured(settings, jdbcDataSource, sessionsTable);
         }
+        this.sessionSequenceFromDB = sessionSequenceFromDBInstance;
 		MessageStoreFactory messageStoreFactory = createMessageStoreFactory(settings, useJdbcStore, jdbcDataSource);
 
         LogFactory logFactory;
@@ -338,6 +346,8 @@ public class Simulator {
 
     /**
      * Sends Logout (35=5) to all logged-on sessions when SendLogout_at_Shutdown=Y.
+     * After each Logout, persists the next sender sequence to DB (when UseJdbcStore=Y) so the next
+     * Logon uses 34=(N+1) instead of reusing 34=N (avoids duplicate MsgSeqNum in TRACE_FIX_MESSAGES_LOG).
      */
     private void sendLogoutToAllSessions() {
         if (sessionSettings == null) {
@@ -352,11 +362,23 @@ public class Simulator {
                 try {
                     Session session = Session.lookupSession(sessionID);
                     if (session != null && session.isLoggedOn()) {
+                        // Before send: read current next sender seq so we can persist (current+1) after send (engine may not flush before process exit)
+                        int nextSeqToPersist = -1;
+                        if (sessionSequenceFromDB != null) {
+                            SessionSequenceFromDB.SessionSequence dbSeq = sessionSequenceFromDB.getSessionSequence(sessionID);
+                            if (dbSeq != null) {
+                                nextSeqToPersist = dbSeq.outgoingSeqNum + 1;
+                            }
+                        }
                         Logout logout = new Logout();
                         logout.setField(new Text("Simulator shutting down"));
                         Session.sendToTarget(logout, sessionID);
                         sent++;
                         log.info("SendLogout_at_Shutdown=Y: sent Logout to initiator for session {}", sessionID);
+                        if (sessionSequenceFromDB != null && nextSeqToPersist >= 1) {
+                            sessionSequenceFromDB.updateOutgoingSeqNum(sessionID, nextSeqToPersist);
+                            log.debug("SendLogout_at_Shutdown: persisted next sender seq {} for {} so next Logon uses 34={}.", nextSeqToPersist, sessionID, nextSeqToPersist);
+                        }
                     }
                 } catch (Exception e) {
                     log.debug("Could not send Logout to {}: {}", sessionID, e.getMessage());
@@ -405,7 +427,12 @@ public class Simulator {
             log.debug("Failed to unregister acceptor from JMX: {}", e.getMessage());
         }
         try {
-            acceptor.stop();
+            // When SendLogout_at_Shutdown=N, use stop(true) so QuickFIX/J does not send Logout (engine's stop() otherwise logs out sessions).
+            // When Y we already sent Logout above; stop(false) lets the engine close cleanly.
+            acceptor.stop(!sendLogoutAtShutdown);
+            if (!sendLogoutAtShutdown) {
+                log.info("SendLogout_at_Shutdown=N: acceptor stopped with forceDisconnect=true (no Logout sent by engine).");
+            }
         } catch (Exception e) {
             log.debug("Acceptor stop: {}", e.getMessage());
         }

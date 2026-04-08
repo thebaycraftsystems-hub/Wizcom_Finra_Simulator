@@ -20,6 +20,8 @@ import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.logging.Level;
 
 import org.quickfixj.jmx.mbean.session.SessionAdmin;
@@ -29,6 +31,7 @@ import org.slf4j.LoggerFactory;
 import com.mysql.jdbc.Field;
 
 import quickfix.ConfigError;
+import quickfix.DefaultMessageFactory;
 import quickfix.DoNotSend;
 import quickfix.FieldConvertError;
 import quickfix.FieldNotFound;
@@ -37,6 +40,7 @@ import quickfix.IncorrectTagValue;
 import quickfix.IntField;
 import quickfix.Message;
 import quickfix.MessageCracker;
+import quickfix.MessageUtils;
 import quickfix.RejectLogon;
 import quickfix.Session;
 import quickfix.SessionID;
@@ -86,6 +90,12 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	private final Set<SessionID> pendingHeartbeatResponseSessions = Collections.synchronizedSet(new HashSet<>());
 	/** App messages (AE etc.) received during HeartBtDelay; replayed after delay completes. Key = SessionID, value = queue of raw FIX strings. */
 	private final ConcurrentMap<SessionID, ConcurrentLinkedQueue<String>> heartbeatDelayAppMessageQueue = new ConcurrentHashMap<>();
+	/** Single-thread executor to run queued app message processing after Heartbeat is sent (avoids sending SPEN from inside toAdmin). */
+	private static final ExecutorService heartbeatDelayQueueExecutor = Executors.newSingleThreadExecutor(r -> {
+		Thread t = new Thread(r, "HeartBtDelay-queue-processor");
+		t.setDaemon(true);
+		return t;
+	});
 
 	/** All from config at startup: primary = quickfixj-server.cfg, secondary = quickfixj-server-secondary.cfg. No defaults. */
 	private final String simulatorRoleFromConfig;
@@ -108,6 +118,22 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 	public void setSessionSequenceFromDB(SessionSequenceFromDB sessionSequenceFromDB) {
 		this.sessionSequenceFromDB = sessionSequenceFromDB;
+	}
+
+	/**
+	 * Returns the session's next sender sequence from the engine (QuickFIX/J 2.3+ getNextSenderMsgSeqNum).
+	 * Used so we never send a lower seq than the engine already has (e.g. when initiator reconnects without us sending Logout).
+	 * @return next sender seq, or -1 if not available (e.g. QuickFIX/J 2.1)
+	 */
+	private static int getNextSenderMsgSeqNumFromSession(Session session) {
+		if (session == null) return -1;
+		try {
+			java.lang.reflect.Method m = Session.class.getMethod("getNextSenderMsgSeqNum");
+			Object v = m.invoke(session);
+			return v != null ? ((Number) v).intValue() : -1;
+		} catch (Exception e) {
+			return -1;
+		}
 	}
 
 	/** Common FIX tag numbers to human-readable names (for incoming message log). */
@@ -401,6 +427,12 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 					nextSender = 1;
 					log.info("Logon: fresh day (no session row in DB for current date); first message to initiator will be 34=1.");
 				}
+				// Never send lower than engine's current next (e.g. initiator reconnected without us sending Logout — SendLogout_at_Shutdown=N)
+				int fromEngine = getNextSenderMsgSeqNumFromSession(session);
+				if (fromEngine >= 1 && fromEngine > nextSender) {
+					nextSender = fromEngine;
+					log.debug("Logon: using engine next sender {} so we don't reuse seq (initiator reconnected without Logout).", nextSender);
+				}
 				// Never send lower than what initiator last said they expected (from previous Logout 58)
 				Integer lastExpected = lastExpectedFromUsBySession.get(arg1);
 				if (lastExpected != null && lastExpected > nextSender) {
@@ -450,6 +482,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 		// On Logout (35=5): if initiator says "expecting N but received M", set session next sender to N so store/DB has N and we send N (this response and next connection).
 		if ("5".equals(msgType)) {
+			boolean didExpectingFix = false;
 			try {
 				String text58 = arg0.getField(new Text()).getValue();
 				if (text58 != null && text58.matches(".*expecting\\s+(\\d+)\\s+but received\\s+\\d+.*")) {
@@ -457,6 +490,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 					if (m.find()) {
 						int expectedFromUs = Integer.parseInt(m.group(1));
 						if (expectedFromUs >= 1) {
+							didExpectingFix = true;
 							lastExpectedFromUsBySession.put(arg1, expectedFromUs);
 							Session session = Session.lookupSession(arg1);
 							if (session != null) {
@@ -476,6 +510,23 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				}
 			} catch (Exception e) {
 				log.debug("Could not parse Logout 58 for auto-fix: {}", e.getMessage());
+			}
+			// When initiator sends Logout (any), persist next sender = current+1 so next Logon uses 34=(N+1) even with SendLogout_at_Shutdown=N
+			if (!didExpectingFix && sessionSequenceFromDB != null) {
+				Session session = Session.lookupSession(arg1);
+				int nextToPersist = -1;
+				if (session != null) {
+					int cur = getNextSenderMsgSeqNumFromSession(session);
+					if (cur >= 1) nextToPersist = cur + 1;
+				}
+				if (nextToPersist < 1) {
+					SessionSequenceFromDB.SessionSequence dbSeq = sessionSequenceFromDB.getSessionSequence(arg1);
+					if (dbSeq != null) nextToPersist = dbSeq.outgoingSeqNum + 1;
+				}
+				if (nextToPersist >= 1) {
+					sessionSequenceFromDB.updateOutgoingSeqNum(arg1, nextToPersist);
+					log.debug("Logout received: persisted next sender {} for {} so next Logon uses 34={}.", nextToPersist, arg1, nextToPersist);
+				}
 			}
 		}
 	}
@@ -510,7 +561,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 						}
 						pendingHeartbeatResponseSessions.remove(arg1);
 						log.info("HeartBtDelay: {}s elapsed, sending Heartbeat to initiator for session {}", secs, arg1);
-						processQueuedAppMessagesAfterHeartbeatDelay(arg1);
+						// Run queue processing after this callback returns so Heartbeat is sent first, then SPEN (avoids sending from inside toAdmin).
+						final SessionID sessionIdForQueue = arg1;
+						heartbeatDelayQueueExecutor.execute(() -> processQueuedAppMessagesAfterHeartbeatDelay(sessionIdForQueue));
 					}
 				}
 			}
@@ -645,23 +698,49 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		crack(arg0, arg1);
 	}
 
-	/** Process all app messages queued during HeartBtDelay; send trade responses to initiator after delay completed. */
+	/** Process all app messages queued during HeartBtDelay; send trade responses (e.g. SPEN) to initiator after delay completed. */
 	private void processQueuedAppMessagesAfterHeartbeatDelay(SessionID sessionId) {
 		ConcurrentLinkedQueue<String> queue = heartbeatDelayAppMessageQueue.remove(sessionId);
-		if (queue == null || queue.isEmpty()) return;
-		log.info("HeartBtDelay completed: processing {} queued app message(s) for session {}", queue.size(), sessionId);
+		if (queue == null || queue.isEmpty()) {
+			log.debug("HeartBtDelay completed: no queued app messages for session {} (queue empty or not present).", sessionId);
+			return;
+		}
+		int count = queue.size();
+		log.info("HeartBtDelay completed: processing {} queued app message(s) for session {} (sending SPEN/response after Heartbeat).", count, sessionId);
 		String raw;
+		int processed = 0;
+		int skipped = 0;
 		while ((raw = queue.poll()) != null) {
 			try {
-				Message msg = new Message(raw);
+				// Parse with MessageFactory so AE becomes TradeCaptureReport; compliance and crack then build SPEN (generic Message breaks SpecValidationEngine cast and crack dispatch).
+				Message msg = MessageUtils.parse(new DefaultMessageFactory(), null, raw);
 				log.info("Request message (after delay) received from Gateway :: [ {} ]", raw);
 				logIncomingMessageTags(msg);
-				if (compliancePipeline.processIncoming(msg, sessionId)) continue;
+				if (compliancePipeline.processIncoming(msg, sessionId)) {
+					skipped++;
+					log.info("HeartBtDelay: skipped queued message (compliance handled or rejected); no SPEN sent for this one.");
+					continue;
+				}
 				crack(msg, sessionId);
+				processed++;
 			} catch (Exception e) {
-				log.warn("Failed to process queued app message after HeartBtDelay: {} — {}", e.getMessage(), raw);
+				// Fallback: parse as generic Message so at least crack may dispatch (e.g. if MessageUtils fails).
+				try {
+					Message msg = new Message(raw);
+					log.info("Request message (after delay) received from Gateway [fallback] :: [ {} ]", raw);
+					logIncomingMessageTags(msg);
+					if (compliancePipeline.processIncoming(msg, sessionId)) {
+						skipped++;
+						continue;
+					}
+					crack(msg, sessionId);
+					processed++;
+				} catch (Exception e2) {
+					log.warn("Failed to process queued app message after HeartBtDelay: {} — raw length={} preview={}", e.getMessage(), raw != null ? raw.length() : 0, raw != null && raw.length() > 200 ? raw.substring(0, 200) + "..." : raw, e);
+				}
 			}
 		}
+		log.info("HeartBtDelay queue done for {}: processed={}, skipped={}.", sessionId, processed, skipped);
 	}
 
 	public void toApp(Message msg, SessionID arg1) throws DoNotSend {
