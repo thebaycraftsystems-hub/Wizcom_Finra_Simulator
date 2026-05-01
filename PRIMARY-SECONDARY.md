@@ -11,6 +11,8 @@ This document describes how the **Primary** and **Secondary (Backup)** simulator
 - **Same FIX session identity**: Both configs use the same `SenderCompID=FNRA`, `TargetCompID=JPMS`, and the same session qualifiers (SP/44B1, CA/44B2, TS/44B3). So the **session ID** (e.g. FIX.4.4:FNRA/SP->JPMS/44B1) is identical for Primary and Secondary.
 - **Same database**: Both use the same JDBC URL and the same tables (`TRACE_FIX_SESSIONS`, `TRACE_FIX_MESSAGES`, and log tables). Session state and sequence numbers are stored there.
 
+**Deployment rule:** `JdbcURL`, `JdbcUser`, `JdbcPassword`, `JdbcStoreSessionsTableName`, and `JdbcStoreMessagesTableName` in `quickfixj-server-secondary.cfg` must match Primary (only `FileStorePath`, `FileLogPath`, ports, and `SimulatorRole` differ). If Secondary pointed at a different database, MsgSeqNum would diverge on failover. On startup with `UseJdbcStore=Y`, the JVM logs a **SHARED SEQ DB** line with the effective JDBC URL and sessions table.
+
 ---
 
 ## 2. How sequence numbers are handled

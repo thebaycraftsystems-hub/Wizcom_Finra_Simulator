@@ -1,5 +1,7 @@
 package com.wizcom.fix.simulator.compliance;
 
+import com.wizcom.fix.simulator.GatewayAllocQtyEcho;
+
 import quickfix.FieldNotFound;
 import quickfix.Message;
 import quickfix.Session;
@@ -47,6 +49,7 @@ public final class ResponseBuilder {
         ack.reverseRoute(req.getHeader());
         ack.getHeader().setField(new MsgType("AR"));
 
+        GatewayAllocQtyEcho.copyTag80IfPresent(req, ack);
         Session.sendToTarget(ack, sessionID);
     }
 

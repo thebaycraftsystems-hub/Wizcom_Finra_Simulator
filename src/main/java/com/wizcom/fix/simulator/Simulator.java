@@ -147,6 +147,7 @@ public class Simulator {
             sessionSequenceFromDBInstance = new SessionSequenceFromDB(jdbcDataSource, sessionsTable, sessionDateZone);
             wizFixApplication.setSessionSequenceFromDB(sessionSequenceFromDBInstance);
             resetSequenceOnStartIfConfigured(settings, jdbcDataSource, sessionsTable);
+            logSharedSequenceDatabaseBanner(settings, sessionsTable);
         }
         this.sessionSequenceFromDB = sessionSequenceFromDBInstance;
 		MessageStoreFactory messageStoreFactory = createMessageStoreFactory(settings, useJdbcStore, jdbcDataSource);
@@ -219,6 +220,26 @@ public class Simulator {
             throw new ConfigError("At least one [SESSION] or [DEFAULT] required for JDBC settings");
         }
         return it.next();
+    }
+
+    /**
+     * Reminds operators that Primary and Secondary must point at the same JdbcURL and sessions table so
+     * {@code TRACE_FIX_SESSIONS} is the single source of truth for MsgSeqNum across failover.
+     */
+    private void logSharedSequenceDatabaseBanner(SessionSettings settings, String sessionsTableName) {
+        try {
+            SessionID sid = getFirstSessionId(settings);
+            String jdbcUrl = settings.getString(sid, "JdbcURL");
+            String role = "Primary";
+            if (settings.isSetting(sid, "SimulatorRole")) {
+                role = settings.getString(sid, "SimulatorRole").trim();
+            }
+            log.warn("SHARED SEQ DB [{}]: JdbcURL={} | table={} — Primary & Secondary MUST use identical JDBC URL and JdbcStoreSessionsTableName; "
+                    + "otherwise MsgSeqNum gaps occur on failover. Local FileStorePath is not authoritative for sequences when UseJdbcStore=Y.",
+                    role, jdbcUrl, sessionsTableName != null ? sessionsTableName : "TRACE_FIX_SESSIONS");
+        } catch (Exception e) {
+            log.debug("Could not log shared sequence DB banner: {}", e.getMessage());
+        }
     }
 
     /**

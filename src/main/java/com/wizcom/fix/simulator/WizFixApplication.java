@@ -4,16 +4,19 @@
 package com.wizcom.fix.simulator;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Objects;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -22,6 +25,9 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 
 import org.quickfixj.jmx.mbean.session.SessionAdmin;
@@ -39,6 +45,7 @@ import quickfix.IncorrectDataFormat;
 import quickfix.IncorrectTagValue;
 import quickfix.IntField;
 import quickfix.Message;
+import quickfix.MessageStore;
 import quickfix.MessageCracker;
 import quickfix.MessageUtils;
 import quickfix.RejectLogon;
@@ -111,29 +118,66 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	private final boolean responseMsgDelayFromConfig;
 	private final int responseMsgDelayTimeFromConfig;
 
+	/** Wall-clock session timeout: after successful Logon, optional timer per SessionID (ignores traffic). Parsed with Boolean.parseBoolean (True/False). */
+	private final boolean sessionTimeoutRequiredFromConfig;
+	private final int sessionTimeoutSecondsFromConfig;
+	/** Config key isLogoutRequiredatSessionTimeout: if True, send Logout when timeout fires; if False, do nothing. Missing key defaults True. */
+	private final boolean isLogoutRequiredAtSessionTimeoutFromConfig;
+	private volatile ScheduledExecutorService sessionTimeoutScheduler;
+	private final ConcurrentMap<SessionID, ScheduledFuture<?>> sessionTimeoutTasks = new ConcurrentHashMap<>();
+
 	/** Optional: on Logon, fetch max sequence from DB and align session (QuickFIX/J 2.3.0 Session API). Set by Simulator when UseJdbcStore=Y. */
 	private volatile SessionSequenceFromDB sessionSequenceFromDB;
 	/** Last "expecting N" from Logout 58, by session; used on next Logon so we never send lower than N if DB was overwritten. */
 	private final ConcurrentMap<SessionID, Integer> lastExpectedFromUsBySession = new ConcurrentHashMap<>();
+
+	/**
+	 * SessionIDs from config where LogOnRejectRequired=Y. QuickFIX/J may pass a runtime SessionID that does not equal the
+	 * config map key ({@code getOrCreateSessionProperties} then only inherits [default]); we match with normalized equality
+	 * and optional sender/target swap.
+	 */
+	private final Set<SessionID> logonRejectRequiredConfiguredSessions;
 
 	public void setSessionSequenceFromDB(SessionSequenceFromDB sessionSequenceFromDB) {
 		this.sessionSequenceFromDB = sessionSequenceFromDB;
 	}
 
 	/**
-	 * Returns the session's next sender sequence from the engine (QuickFIX/J 2.3+ getNextSenderMsgSeqNum).
-	 * Used so we never send a lower seq than the engine already has (e.g. when initiator reconnects without us sending Logout).
-	 * @return next sender seq, or -1 if not available (e.g. QuickFIX/J 2.1)
+	 * Returns the session's next sender sequence from the engine after refresh (e.g. after Logon refresh from JdbcStore).
+	 * QuickFIX/J 2.3+ exposes {@link Session#getNextSenderMsgSeqNum()}; 2.1.x does not — use {@link MessageStore#getNextSenderMsgSeqNum()}.
 	 */
 	private static int getNextSenderMsgSeqNumFromSession(Session session) {
-		if (session == null) return -1;
-		try {
-			java.lang.reflect.Method m = Session.class.getMethod("getNextSenderMsgSeqNum");
-			Object v = m.invoke(session);
-			return v != null ? ((Number) v).intValue() : -1;
-		} catch (Exception e) {
+		if (session == null) {
 			return -1;
 		}
+		java.lang.reflect.Method m = null;
+		try {
+			m = Session.class.getMethod("getNextSenderMsgSeqNum");
+		} catch (NoSuchMethodException e) {
+			// QFJ 2.1.x: use MessageStore below
+		}
+		if (m != null) {
+			try {
+				Object v = m.invoke(session);
+				if (v != null) {
+					int n = ((Number) v).intValue();
+					if (n >= 1) {
+						return n;
+					}
+				}
+			} catch (Exception e) {
+				log.trace("getNextSenderMsgSeqNum on Session: {}", e.toString());
+			}
+		}
+		try {
+			MessageStore store = session.getStore();
+			if (store != null) {
+				return store.getNextSenderMsgSeqNum();
+			}
+		} catch (IOException e) {
+			log.debug("getNextSenderMsgSeqNum from MessageStore: {}", e.getMessage());
+		}
+		return -1;
 	}
 
 	/** Common FIX tag numbers to human-readable names (for incoming message log). */
@@ -177,6 +221,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		FIX_TAG_NAMES.put(44, "Price");
 		FIX_TAG_NAMES.put(6, "AvgPx");
 		FIX_TAG_NAMES.put(14, "CumQty");
+		FIX_TAG_NAMES.put(80, "AllocQty");
 	}
 	/** MsgType (35) value to name for log. */
 	private static String msgTypeName(String value) {
@@ -254,6 +299,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		this.traceNotAvailableIntervelFromConfig = 120;
 		this.responseMsgDelayFromConfig = false;
 		this.responseMsgDelayTimeFromConfig = 0;
+		this.sessionTimeoutRequiredFromConfig = false;
+		this.sessionTimeoutSecondsFromConfig = 0;
+		this.isLogoutRequiredAtSessionTimeoutFromConfig = true;
+		this.logonRejectRequiredConfiguredSessions = Collections.emptySet();
 		this.compliancePipeline = new CompliancePipeline();
 	}
 
@@ -281,10 +330,21 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		this.traceNotAvailableIntervelFromConfig = requireIntFromDefault(settings, "TraceNotAvailableIntervel");
 		this.responseMsgDelayFromConfig = requireBoolFromDefault(settings, "ResponseMsgDelay");
 		this.responseMsgDelayTimeFromConfig = requireIntFromDefault(settings, "ResponseMsgDelayTime");
-		log.info("Config at startup ({}): LogonRequired={}, LogonDelay={}, LogonDelayinSecs={}, HeartBeat_Required={}, HeartBtDelay={}, HeartBtDelayTime={}, ResponseMsgDelay={}, ResponseMsgDelayTime={}",
+		this.sessionTimeoutRequiredFromConfig = readSessionTimeoutRequired(settings);
+		this.sessionTimeoutSecondsFromConfig = readSessionTimeoutSeconds(settings);
+		this.isLogoutRequiredAtSessionTimeoutFromConfig = readIsLogoutRequiredAtSessionTimeout(settings);
+		this.logonRejectRequiredConfiguredSessions = Collections.unmodifiableSet(loadLogonRejectRequiredSessionIds(settings));
+		if (!logonRejectRequiredConfiguredSessions.isEmpty()) {
+			log.info("LogOnRejectRequired=Y for {} session(s): {}", logonRejectRequiredConfiguredSessions.size(), logonRejectRequiredConfiguredSessions);
+		}
+		if (sessionTimeoutRequiredFromConfig && sessionTimeoutSecondsFromConfig <= 0) {
+			log.warn("SessionTimeoutRequired=True but SessionTimeoutSeconds is missing or <= 0 — wall-clock session timeout disabled.");
+		}
+		log.info("Config at startup ({}): LogonRequired={}, LogonDelay={}, LogonDelayinSecs={}, HeartBeat_Required={}, HeartBtDelay={}, HeartBtDelayTime={}, ResponseMsgDelay={}, ResponseMsgDelayTime={}, SessionTimeoutRequired={}, SessionTimeoutSeconds={}, isLogoutRequiredatSessionTimeout={}",
 			simulatorRoleFromConfig, logonRequiredFromConfig, logonDelayFromConfig, logonDelaySecsFromConfig,
 			heartBeatRequiredFromConfig, heartBtDelayFromConfig, heartBtDelayTimeFromConfig,
-			responseMsgDelayFromConfig, responseMsgDelayTimeFromConfig);
+			responseMsgDelayFromConfig, responseMsgDelayTimeFromConfig,
+			sessionTimeoutRequiredFromConfig, sessionTimeoutSecondsFromConfig, isLogoutRequiredAtSessionTimeoutFromConfig);
 		String logonSecsLine = simulatorRoleFromConfig + " LogonDelayinSecs from config = " + logonDelaySecsFromConfig;
 		log.info(logonSecsLine);
 		System.out.println(logonSecsLine);
@@ -335,31 +395,107 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		this.traceNotAvailableIntervelFromConfig = 120;
 		this.responseMsgDelayFromConfig = false;
 		this.responseMsgDelayTimeFromConfig = 0;
+		this.sessionTimeoutRequiredFromConfig = false;
+		this.sessionTimeoutSecondsFromConfig = 0;
+		this.isLogoutRequiredAtSessionTimeoutFromConfig = true;
+		this.logonRejectRequiredConfiguredSessions = Collections.emptySet();
 		this.compliancePipeline = new CompliancePipeline();
 	}
 	
 	public void onCreate(SessionID arg0) {	}
 
-	public void onLogon(SessionID arg0) {	}
+	public void onLogon(SessionID arg0) {
+		scheduleSessionWallClockTimeout(arg0);
+	}
 
-	public void onLogout(SessionID arg0) {	}
+	public void onLogout(SessionID arg0) {
+		cancelSessionWallClockTimeout(arg0);
+	}
+
+	/**
+	 * Emit session-level Reject (MsgType 3) for the initiator's Logon. QuickFIX/J's {@link Session#send(Message)} uses
+	 * {@code sendRaw}, which does not transmit 35=3 until the session is logged on, so the engine would never send this
+	 * reject during failed logon. We mirror {@code Session.generateReject(Message, String)} and push the formatted string
+	 * through {@code Session.send(String)}, then advance the sender sequence in the store.
+	 *
+	 * @return true if the FIX string was handed to the session transport
+	 */
+	private boolean sendSessionLevelRejectForIncomingLogon(SessionID sessionID, Message incomingLogon, String rejectText)
+			throws FieldNotFound {
+		Session session = Session.lookupSession(sessionID);
+		if (session == null) {
+			log.warn("sendSessionLevelRejectForIncomingLogon: no Session for {}", sessionID);
+			return false;
+		}
+		String beginString = sessionID.getBeginString();
+		Message reject = new DefaultMessageFactory().create(beginString, MsgType.REJECT);
+		reject.reverseRoute(incomingLogon.getHeader());
+		int refSeq = incomingLogon.getHeader().getInt(MsgSeqNum.FIELD);
+		reject.setInt(RefSeqNum.FIELD, refSeq);
+		reject.setString(RefMsgType.FIELD, MsgType.LOGON);
+		reject.setInt(SessionRejectReason.FIELD, SessionRejectReason.OTHER);
+		reject.setString(Text.FIELD, rejectText);
+
+		int seq = session.getExpectedSenderNum();
+		reject.getHeader().setInt(MsgSeqNum.FIELD, seq);
+		reject.getHeader().setField(new SendingTime());
+
+		final String fixString;
+		try {
+			fixString = reject.toString();
+		} catch (Exception e) {
+			log.warn("Failed to build session Reject message: {}", e.getMessage());
+			return false;
+		}
+
+		try {
+			Method sendString = Session.class.getDeclaredMethod("send", String.class);
+			sendString.setAccessible(true);
+			Object ok = sendString.invoke(session, fixString);
+			if (ok instanceof Boolean && !((Boolean) ok)) {
+				log.warn("Session.send(String) returned false for session-level Reject");
+				return false;
+			}
+		} catch (Exception e) {
+			log.warn("Failed to emit session Reject on wire: {}", e.getMessage());
+			return false;
+		}
+
+		try {
+			session.setNextSenderMsgSeqNum(seq + 1);
+		} catch (Exception e) {
+			log.warn("Failed to persist next sender seq after Reject: {}", e.getMessage());
+		}
+		log.info("Sent session-level Reject (35=3) for incoming Logon RefSeqNum={}, outgoing MsgSeqNum={}", refSeq, seq);
+		return true;
+	}
 		
 	public void fromAdmin(Message arg0, SessionID arg1) throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, RejectLogon {
+		String msgType = null;
+		try { msgType = arg0.getHeader().getField(new MsgType()).getValue(); } catch (FieldNotFound ignored) { }
+
+		// Reject Logon before pending-delay handling so LogOnRejectRequired=Y always applies to that session.
+		if ("A".equals(msgType) && logonRequiredFromConfig && logOnRejectRequiredForSession(arg1)) {
+			log.warn("{}: LogOnRejectRequired=Y — rejecting Logon for session {}", simulatorRoleFromConfig, arg1);
+			String reason = "Logon rejected (LogOnRejectRequired=Y for this session)";
+			boolean rejectOnWire = sendSessionLevelRejectForIncomingLogon(arg1, arg0, reason);
+			// QFJ does not transmit 35=3 via Session.send(Message) before logon; we use send(String). If that failed, send Logout (35=5).
+			throw new RejectLogon(reason, !rejectOnWire, -1);
+		}
+
 		if (pendingLogonResponseSessions.contains(arg1) || pendingHeartbeatResponseSessions.contains(arg1)) {
 			log.info("Ignoring admin message until we send Logon/Heartbeat back to initiator: [ {} ]", arg0.toString());
 			return;
 		}
 		if (!logonRequiredFromConfig) {
 			log.info("Picked message from initiator: [ {} ]. Since we configured LogonRequired=N, not sending any response to initiator.", arg0.toString());
-			String msgType = null;
-			try { msgType = arg0.getHeader().getField(new MsgType()).getValue(); } catch (FieldNotFound ignored) { }
 			if ("A".equals(msgType)) {
-				throw new RejectLogon("LogonRequired=N: simulator does not send Logon", false, -1);
+				String reason = "LogonRequired=N: simulator does not send Logon";
+				boolean rejectOnWire = sendSessionLevelRejectForIncomingLogon(arg1, arg0, reason);
+				throw new RejectLogon(reason, !rejectOnWire, -1);
 			}
 			return;
 		}
-		String msgType = null;
-		try { msgType = arg0.getHeader().getField(new MsgType()).getValue(); } catch (FieldNotFound ignored) { }
 		if ("A".equals(msgType)) {
 			// Use values read from config at startup (primary or secondary)
 			if (logonDelayFromConfig && logonDelaySecsFromConfig > 0) {
@@ -388,50 +524,67 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				// Set next expected to the Logon's MsgSeqNum so engine sends 789 = logonMsgSeqNum+1 (never 0)
 				int storeNextTarget = Math.max(1, logonMsgSeqNum);
 				int nextSender = -1;
+				SessionSequenceFromDB.SessionSequence dbSeq = null;
 
-				// Initiator may send 789 (NextExpectedMsgSeqNum): the seq they expect from us next. Use it so we don't send too low (e.g. 2 when they expect 3).
-				try {
-					int initiatorExpectedFromUs = arg0.getField(new NextExpectedMsgSeqNum()).getValue();
-					nextSender = Math.max(1, initiatorExpectedFromUs);
-					log.info("Logon(789={}): using next sender {} so initiator receives expected sequence (reset/align).", initiatorExpectedFromUs, nextSender);
-				} catch (FieldNotFound e) {
-					// No 789: use DB or 1
-				}
-
-				if (nextSender < 1) {
-					SessionSequenceFromDB loader = sessionSequenceFromDB;
-					if (loader != null) {
-						SessionSequenceFromDB.SessionSequence dbSeq = loader.getSessionSequence(arg1);
-						if (dbSeq != null) {
-							// DB has a row for current date (sessionDateZone) — use persisted sequence
-							nextSender = Math.max(1, dbSeq.outgoingSeqNum);
-							// Initiator is behind (e.g. reconnected with lower seq): align so we don't send 34=288 when they expect 155
-							if ((logonMsgSeqNum + 1) < nextSender) {
-								nextSender = Math.max(1, logonMsgSeqNum + 1);
-								log.info("Logon(34={}): initiator behind; aligning next sender to {} so first message to initiator is not higher (avoid 'expecting N but received 154').", logonMsgSeqNum, nextSender);
-							}
-							if (logonMsgSeqNum > dbSeq.incomingSeqNum) {
-								log.info("Logon(34={}): sequence numbers were missing (DB had expected {}); gap {}..{} requested by engine via ResendRequest if configured.",
-										logonMsgSeqNum, dbSeq.incomingSeqNum, dbSeq.incomingSeqNum, logonMsgSeqNum - 1);
-							}
-						if (dbSeq.incomingSeqNum > logonMsgSeqNum + 1) {
-							log.debug("Logon(34={}): DB had expected {}; setting store so 789={} (initiator's next accepted).",
-									logonMsgSeqNum, dbSeq.incomingSeqNum, logonMsgSeqNum + 1);
-						}
-							log.debug("Logon: fetched from DB incoming_seqnum={}, outgoing_seqnum={}; using next sender {} (never 0).", dbSeq.incomingSeqNum, dbSeq.outgoingSeqNum, nextSender);
-						}
+				// 1) Load shared TRACE_FIX_SESSIONS first (Primary/Secondary failover). Previously we applied initiator 789
+				//    before DB and skipped the DB block when 789 set nextSender>=1 — wrong: Secondary's file store starts at 1
+				//    but outgoing_seqnum must continue from the shared JDBC store after Primary handled the session.
+				SessionSequenceFromDB loader = sessionSequenceFromDB;
+				if (loader != null) {
+					dbSeq = loader.getSessionSequence(arg1);
+					if (dbSeq != null) {
+						nextSender = dbSeq.outgoingSeqNum;
+						log.info("Logon: DB outgoing_seqnum={} incoming_seqnum={} for {} (shared store / failover).",
+								dbSeq.outgoingSeqNum, dbSeq.incomingSeqNum, arg1);
 					}
 				}
+
+				// 2) Initiator may send 789 on Logon = next seq they expect from us; merge up, never down vs DB
+				try {
+					int initiatorExpectedFromUs = arg0.getField(new NextExpectedMsgSeqNum()).getValue();
+					int hint = Math.max(1, initiatorExpectedFromUs);
+					if (nextSender < 1) {
+						nextSender = hint;
+					} else {
+						nextSender = Math.max(nextSender, hint);
+					}
+					log.info("Logon(789={}): merged next sender (with DB if any) = {}", initiatorExpectedFromUs, nextSender);
+				} catch (FieldNotFound e) {
+					// optional on Logon
+				}
+
+				if (dbSeq != null) {
+					// Initiator is behind (e.g. reconnected with lower seq): align so we don't exceed their position
+					if ((logonMsgSeqNum + 1) < nextSender) {
+						nextSender = Math.max(1, logonMsgSeqNum + 1);
+						log.info("Logon(34={}): initiator behind; aligning next sender to {} so first message to initiator is not higher (avoid 'expecting N but received 154').",
+								logonMsgSeqNum, nextSender);
+					}
+					if (logonMsgSeqNum > dbSeq.incomingSeqNum) {
+						log.info("Logon(34={}): sequence numbers were missing (DB had expected {}); gap {}..{} requested by engine via ResendRequest if configured.",
+								logonMsgSeqNum, dbSeq.incomingSeqNum, dbSeq.incomingSeqNum, logonMsgSeqNum - 1);
+					}
+					if (dbSeq.incomingSeqNum > logonMsgSeqNum + 1) {
+						log.debug("Logon(34={}): DB had expected {}; setting store so 789={} (initiator's next accepted).",
+								logonMsgSeqNum, dbSeq.incomingSeqNum, logonMsgSeqNum + 1);
+					}
+					log.debug("Logon: DB incoming_seqnum={}, outgoing_seqnum={}, next sender after merge = {}",
+							dbSeq.incomingSeqNum, dbSeq.outgoingSeqNum, nextSender);
+				}
+
 				// Start of day: no session row for current date (creation_time not today in SessionDateZone) → fresh day → first message to initiator is 34=1
 				if (nextSender < 1) {
 					nextSender = 1;
 					log.info("Logon: fresh day (no session row in DB for current date); first message to initiator will be 34=1.");
 				}
-				// Never send lower than engine's current next (e.g. initiator reconnected without us sending Logout — SendLogout_at_Shutdown=N)
+				// 3) Merge engine next sender (local file store often 1 on Secondary); take max so DB/shared state wins at failover
 				int fromEngine = getNextSenderMsgSeqNumFromSession(session);
-				if (fromEngine >= 1 && fromEngine > nextSender) {
-					nextSender = fromEngine;
-					log.debug("Logon: using engine next sender {} so we don't reuse seq (initiator reconnected without Logout).", nextSender);
+				if (fromEngine >= 1) {
+					int merged = Math.max(nextSender, fromEngine);
+					if (merged != nextSender) {
+						log.debug("Logon: raised next sender from {} to {} (engine had higher; e.g. same-JVM reconnect).", nextSender, merged);
+					}
+					nextSender = merged;
 				}
 				// Never send lower than what initiator last said they expected (from previous Logout 58)
 				Integer lastExpected = lastExpectedFromUsBySession.get(arg1);
@@ -444,7 +597,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				log.debug("Logon(34={}): set store so engine sends 789={} (expect initiator next {}); store/DB updated.", logonMsgSeqNum, logonMsgSeqNum + 1, logonMsgSeqNum + 1);
 				try {
 					session.setNextSenderMsgSeqNum(nextSender);
-					log.debug("Logon: set next sender seq to {} (from DB or 1).", nextSender);
+					log.info("Logon: set next sender seq to {} (TRACE_FIX_SESSIONS / 789 / engine max — shared across Primary/Secondary when UseJdbcStore=Y).", nextSender);
 				} catch (Exception e) {
 					log.warn("Could not set next sender seq after Logon: {}", e.getMessage());
 				}
@@ -613,6 +766,93 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		}
 	}
 
+	/**
+	 * Collect {@code [session]} blocks with LogOnRejectRequired=Y at startup (reliable config keys on parsed SessionIDs).
+	 */
+	private static Set<SessionID> loadLogonRejectRequiredSessionIds(SessionSettings settings) throws ConfigError, FieldConvertError {
+		Set<SessionID> out = new HashSet<>();
+		Iterator<SessionID> it = settings.sectionIterator();
+		while (it.hasNext()) {
+			SessionID sid = it.next();
+			try {
+				if (settings.isSetting(sid, "LogOnRejectRequired") && settings.getBool(sid, "LogOnRejectRequired"))
+					out.add(sid);
+			} catch (Exception e) {
+				log.debug("LogOnRejectRequired skip {}: {}", sid, e.getMessage());
+			}
+		}
+		return out;
+	}
+
+	private static String normSessionPart(String s) {
+		if (s == null || s.isEmpty())
+			return "";
+		if (SessionID.NOT_SET.equals(s))
+			return "";
+		return s;
+	}
+
+	/** True if both IDs identify the same FIX session (handles NOT_SET vs empty and field alignment). */
+	private static boolean sessionIdsFixEquivalent(SessionID a, SessionID b) {
+		if (a == null || b == null)
+			return false;
+		return Objects.equals(a.getBeginString(), b.getBeginString())
+				&& Objects.equals(normSessionPart(a.getSenderCompID()), normSessionPart(b.getSenderCompID()))
+				&& Objects.equals(normSessionPart(a.getTargetCompID()), normSessionPart(b.getTargetCompID()))
+				&& Objects.equals(normSessionPart(a.getSenderSubID()), normSessionPart(b.getSenderSubID()))
+				&& Objects.equals(normSessionPart(a.getTargetSubID()), normSessionPart(b.getTargetSubID()))
+				&& Objects.equals(normSessionPart(a.getSenderLocationID()), normSessionPart(b.getSenderLocationID()))
+				&& Objects.equals(normSessionPart(a.getTargetLocationID()), normSessionPart(b.getTargetLocationID()))
+				&& Objects.equals(normSessionPart(a.getSessionQualifier()), normSessionPart(b.getSessionQualifier()));
+	}
+
+	/** Swap sender/target halves (some stacks use initiator-first SessionID vs acceptor config order). */
+	private static SessionID swapSessionSenderTarget(SessionID sid) {
+		return new SessionID(sid.getBeginString(),
+				sid.getTargetCompID(), sid.getTargetSubID(), sid.getTargetLocationID(),
+				sid.getSenderCompID(), sid.getSenderSubID(), sid.getSenderLocationID(),
+				sid.getSessionQualifier());
+	}
+
+	private static boolean matchesLogonRejectConfigured(SessionID runtime, Set<SessionID> configured) {
+		if (runtime == null || configured.isEmpty())
+			return false;
+		if (configured.contains(runtime))
+			return true;
+		for (SessionID cfg : configured) {
+			if (sessionIdsFixEquivalent(cfg, runtime))
+				return true;
+		}
+		SessionID swapped = swapSessionSenderTarget(runtime);
+		if (configured.contains(swapped))
+			return true;
+		for (SessionID cfg : configured) {
+			if (sessionIdsFixEquivalent(cfg, swapped))
+				return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Per-[session] LogOnRejectRequired=Y: reject incoming Logon for that session only. Uses startup session list plus
+	 * normalized SessionID match so lookup works when runtime SessionID is not the same object as the config section key.
+	 */
+	private boolean logOnRejectRequiredForSession(SessionID sid) {
+		if (sid == null)
+			return false;
+		if (matchesLogonRejectConfigured(sid, logonRejectRequiredConfiguredSessions))
+			return true;
+		if (settings == null)
+			return false;
+		try {
+			if (settings.isSetting(sid, "LogOnRejectRequired"))
+				return settings.getBool(sid, "LogOnRejectRequired");
+		} catch (Exception e) {
+			log.trace("LogOnRejectRequired: {}", e.getMessage());
+		}
+		return false;
+	}
+
 	private int getIntSetting(SessionID sessionID, String key, int defaultValue) {
 		try {
 			if (sessionID != null && settings.isSetting(sessionID, key))
@@ -638,6 +878,111 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		if (s == null || !s.isSetting(key))
 			throw new ConfigError("Missing required key in config: " + key);
 		return (int) s.getLong(key);
+	}
+
+	/** SessionTimeoutRequired: True/False (Boolean.parseBoolean). Optional in [default]; missing = false. */
+	private static boolean readSessionTimeoutRequired(SessionSettings s) {
+		try {
+			if (s == null || !s.isSetting("SessionTimeoutRequired")) return false;
+			return Boolean.parseBoolean(s.getString("SessionTimeoutRequired").trim());
+		} catch (Exception e) {
+			return false;
+		}
+	}
+
+	/** SessionTimeoutSeconds: optional in [default]; missing or invalid = 0. */
+	private static int readSessionTimeoutSeconds(SessionSettings s) {
+		try {
+			if (s == null || !s.isSetting("SessionTimeoutSeconds")) return 0;
+			return Integer.parseInt(s.getString("SessionTimeoutSeconds").trim());
+		} catch (Exception e) {
+			return 0;
+		}
+	}
+
+	/** isLogoutRequiredatSessionTimeout: True/False. Optional; missing = True (send Logout on timeout). */
+	private static boolean readIsLogoutRequiredAtSessionTimeout(SessionSettings s) {
+		try {
+			if (s == null || !s.isSetting("isLogoutRequiredatSessionTimeout")) return true;
+			return Boolean.parseBoolean(s.getString("isLogoutRequiredatSessionTimeout").trim());
+		} catch (Exception e) {
+			return true;
+		}
+	}
+
+	private boolean sessionTimeoutRequiredEffective(SessionID sid) {
+		try {
+			if (sid != null && settings.isSetting(sid, "SessionTimeoutRequired"))
+				return Boolean.parseBoolean(settings.getString(sid, "SessionTimeoutRequired").trim());
+		} catch (Exception ignored) { }
+		return sessionTimeoutRequiredFromConfig;
+	}
+
+	private int sessionTimeoutSecondsEffective(SessionID sid) {
+		try {
+			if (sid != null && settings.isSetting(sid, "SessionTimeoutSeconds"))
+				return Math.max(0, Integer.parseInt(settings.getString(sid, "SessionTimeoutSeconds").trim()));
+		} catch (Exception ignored) { }
+		return Math.max(0, sessionTimeoutSecondsFromConfig);
+	}
+
+	private boolean isLogoutRequiredAtSessionTimeoutEffective(SessionID sid) {
+		try {
+			if (sid != null && settings.isSetting(sid, "isLogoutRequiredatSessionTimeout"))
+				return Boolean.parseBoolean(settings.getString(sid, "isLogoutRequiredatSessionTimeout").trim());
+		} catch (Exception ignored) { }
+		return isLogoutRequiredAtSessionTimeoutFromConfig;
+	}
+
+	private ScheduledExecutorService getOrCreateSessionTimeoutScheduler() {
+		if (sessionTimeoutScheduler != null) return sessionTimeoutScheduler;
+		synchronized (this) {
+			if (sessionTimeoutScheduler == null) {
+				sessionTimeoutScheduler = Executors.newScheduledThreadPool(1, r -> {
+					Thread t = new Thread(r, "SessionWallClockTimeout-" + simulatorRoleFromConfig);
+					t.setDaemon(true);
+					return t;
+				});
+			}
+			return sessionTimeoutScheduler;
+		}
+	}
+
+	/** After successful FIX Logon: schedule wall-clock timeout for this SessionID (ignores traffic). Logout only if isLogoutRequiredatSessionTimeout=True. */
+	private void scheduleSessionWallClockTimeout(SessionID sid) {
+		cancelSessionWallClockTimeout(sid);
+		boolean req = sessionTimeoutRequiredEffective(sid);
+		int sec = sessionTimeoutSecondsEffective(sid);
+		if (!req || sec <= 0) return;
+		ScheduledExecutorService sched = getOrCreateSessionTimeoutScheduler();
+		final boolean sendLogoutOnTimeout = isLogoutRequiredAtSessionTimeoutEffective(sid);
+		final ScheduledFuture<?>[] taskRef = new ScheduledFuture<?>[1];
+		taskRef[0] = sched.schedule(() -> {
+			try {
+				Session s = Session.lookupSession(sid);
+				if (s != null && s.isLoggedOn()) {
+					if (sendLogoutOnTimeout) {
+						log.info("{}: wall-clock session timeout ({}s) — sending Logout for {}", simulatorRoleFromConfig, sec, sid);
+						s.logout("Session timeout (" + sec + "s wall clock)");
+					} else {
+						log.info("{}: wall-clock session timeout ({}s) for {} — isLogoutRequiredatSessionTimeout=False; not sending Logout",
+							simulatorRoleFromConfig, sec, sid);
+					}
+				}
+			} catch (Exception e) {
+				log.warn("Session wall-clock timeout failed for {}: {}", sid, e.getMessage());
+			} finally {
+				sessionTimeoutTasks.remove(sid, taskRef[0]);
+			}
+		}, sec, TimeUnit.SECONDS);
+		sessionTimeoutTasks.put(sid, taskRef[0]);
+		log.info("{}: wall-clock session timeout scheduled: {}s for {} (isLogoutRequiredatSessionTimeout={})",
+			simulatorRoleFromConfig, sec, sid, sendLogoutOnTimeout);
+	}
+
+	private void cancelSessionWallClockTimeout(SessionID sid) {
+		ScheduledFuture<?> f = sessionTimeoutTasks.remove(sid);
+		if (f != null) f.cancel(false);
 	}
 
 	/** Print whole config file to console and logs. Prefer file in current directory (same as load). */
@@ -909,7 +1254,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		resTrdCapRpt.reverseRoute(reqTrdCapRpt.getHeader());
 		
 		resTrdCapRpt.getHeader().setField(new MsgType("AR"));
-		
+
+		GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
 		Session.sendToTarget(resTrdCapRpt, sessionID);
 	}
 	
@@ -988,6 +1334,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			ensureDefaultsForENResponse(resTrdCapRpt);    // fill blank/null body fields with FIX defaults for EN
 			ensureENHasTwoSidesWithStructure(resTrdCapRpt); // CAEN/SPEN/TSEN: 552=2, first side 802/523/803/528/58, second BCAP/17
 			removeTagsNotExpectedForEN(resTrdCapRpt);   // strip 939, 22002 so format matches valid initiator sample
+			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			compliancePipeline.getLifecycleEngine().markAccepted(reqTrdCapRpt.getTradeReportID().getValue(), sessionID);
 
@@ -1049,6 +1396,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			ensureDefaultsForENResponse(resTrdCapRpt);    // fill blank/null body fields with FIX defaults for CR
 			ensureENHasTwoSidesWithStructure(resTrdCapRpt); // CACR/SPCR/TSCR: 552=2, same two sides as valid format
 			removeTagsNotExpectedForEN(resTrdCapRpt);     // strip 939, 22002 for CR
+			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			
 			if(777 == reqTrdCapRpt.getLastPx().getValue()) {
@@ -1110,6 +1458,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				try { resTrdCapRpt.removeField(tag); } catch (Exception ignored) { }
 			}
 			ensureCXHasOneSideWithStructure(resTrdCapRpt); // 552=1, one side: 54=2, 37=NONE, 453=1, 448=JPMS, 447=C, 452=1
+			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 						
 		} catch (SessionNotFound sessionNotFound) {
@@ -1164,6 +1513,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			ensureDefaultsForHXResponse(resTrdCapRpt);     // fill blank/null body fields with FIX defaults for HX
 			removeTagsNotExpectedForHX(resTrdCapRpt);       // CAHX/SPHX/TSHX: no 939, 22002, 22036
 			ensureHXHasTwoSidesWithStructure(resTrdCapRpt); // 552=2, first side 453=2 TEST/JPMB, 528/58; second side C/17
+			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
@@ -1223,7 +1573,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			}
 
 			log.debug("Changed TargetCompID :: "+ resTrdCapRpt.getHeader().getField(new StringField(56)).getValue());
-			
+
+			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
 			for( final Iterator<SessionID> i = settings.sectionIterator(); i.hasNext(); ) {
 			  final SessionID id = i.next();
 			  if( id.getTargetCompID().startsWith(targetCompID) && id.getTargetSubID().startsWith(resTrdCapRpt.getHeader().getField(new StringField(57)).getValue()) ) {
@@ -1311,7 +1662,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			resTrdCapRpt.addGroup( buildSidesGroup(rpidSide, rpid, 1));
 			
 			resTrdCapRpt.addGroup( buildSidesGroup(cpidSide, cpid, 17));
-			
+
+			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			
 		} catch (SessionNotFound sessionNotFound) {
