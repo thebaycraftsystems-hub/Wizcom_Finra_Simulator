@@ -61,6 +61,7 @@ import quickfix.fix44.Message.Header;
 import quickfix.fix44.TestRequest;
 import quickfix.fix44.TradeCaptureReport;
 import quickfix.fix44.TradeCaptureReportAck;
+import quickfix.fix44.component.CommissionData;
 import quickfix.fix44.component.Instrument;
 import quickfix.fix44.component.Parties;
 
@@ -1332,9 +1333,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			ensureMandatoryFieldsForAE(resTrdCapRpt);
 			ensureExpectedFieldsForInitiator(resTrdCapRpt);
 			ensureDefaultsForENResponse(resTrdCapRpt);    // fill blank/null body fields with FIX defaults for EN
-			ensureENHasTwoSidesWithStructure(resTrdCapRpt); // CAEN/SPEN/TSEN: 552=2, first side 802/523/803/528/58, second BCAP/17
+			ensureENHasTwoSidesWithStructure(resTrdCapRpt, reqTrdCapRpt); // CAEN/SPEN/TSEN: 552=2; AllocQty in NoAllocs per FIX 4.4
 			removeTagsNotExpectedForEN(resTrdCapRpt);   // strip 939, 22002 so format matches valid initiator sample
-			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
+			applyAePricingEchoAndFinraCaenOrder(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			compliancePipeline.getLifecycleEngine().markAccepted(reqTrdCapRpt.getTradeReportID().getValue(), sessionID);
 
@@ -1394,9 +1395,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			ensureMandatoryFieldsForAE(resTrdCapRpt);
 			ensureExpectedFieldsForInitiator(resTrdCapRpt);
 			ensureDefaultsForENResponse(resTrdCapRpt);    // fill blank/null body fields with FIX defaults for CR
-			ensureENHasTwoSidesWithStructure(resTrdCapRpt); // CACR/SPCR/TSCR: 552=2, same two sides as valid format
+			ensureENHasTwoSidesWithStructure(resTrdCapRpt, reqTrdCapRpt); // CACR/SPCR/TSCR: 552=2
 			removeTagsNotExpectedForEN(resTrdCapRpt);     // strip 939, 22002 for CR
-			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
+			applyAePricingEchoAndFinraCaenOrder(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			
 			if(777 == reqTrdCapRpt.getLastPx().getValue()) {
@@ -1458,7 +1459,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				try { resTrdCapRpt.removeField(tag); } catch (Exception ignored) { }
 			}
 			ensureCXHasOneSideWithStructure(resTrdCapRpt); // 552=1, one side: 54=2, 37=NONE, 453=1, 448=JPMS, 447=C, 452=1
-			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
+			GatewayAllocQtyEcho.copyInboundPricingToReportingSide(reqTrdCapRpt, resTrdCapRpt);
+			GatewayAllocQtyEcho.stripRootLevelPricingTags(resTrdCapRpt);
+			reorderAckBodyAfterStrip(resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 						
 		} catch (SessionNotFound sessionNotFound) {
@@ -1513,7 +1516,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			ensureDefaultsForHXResponse(resTrdCapRpt);     // fill blank/null body fields with FIX defaults for HX
 			removeTagsNotExpectedForHX(resTrdCapRpt);       // CAHX/SPHX/TSHX: no 939, 22002, 22036
 			ensureHXHasTwoSidesWithStructure(resTrdCapRpt); // 552=2, first side 453=2 TEST/JPMB, 528/58; second side C/17
-			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
+			GatewayAllocQtyEcho.copyInboundPricingToReportingSide(reqTrdCapRpt, resTrdCapRpt);
+			GatewayAllocQtyEcho.stripRootLevelPricingTags(resTrdCapRpt);
+			reorderAckBodyAfterStrip(resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
@@ -1574,7 +1579,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 			log.debug("Changed TargetCompID :: "+ resTrdCapRpt.getHeader().getField(new StringField(56)).getValue());
 
-			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
+			GatewayAllocQtyEcho.copyInboundPricingToReportingSide(reqTrdCapRpt, resTrdCapRpt);
+			GatewayAllocQtyEcho.stripRootLevelPricingTags(resTrdCapRpt);
+			reorderAckBodyAfterStrip(resTrdCapRpt);
 			for( final Iterator<SessionID> i = settings.sectionIterator(); i.hasNext(); ) {
 			  final SessionID id = i.next();
 			  if( id.getTargetCompID().startsWith(targetCompID) && id.getTargetSubID().startsWith(resTrdCapRpt.getHeader().getField(new StringField(57)).getValue()) ) {
@@ -1663,7 +1670,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			
 			resTrdCapRpt.addGroup( buildSidesGroup(cpidSide, cpid, 17));
 
-			GatewayAllocQtyEcho.copyTag80IfPresent(reqTrdCapRpt, resTrdCapRpt);
+			GatewayAllocQtyEcho.copyInboundPricingToReportingSide(reqTrdCapRpt, resTrdCapRpt);
+			GatewayAllocQtyEcho.stripRootLevelPricingTags(resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			
 		} catch (SessionNotFound sessionNotFound) {
@@ -1675,7 +1683,66 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		
 	}
 	
-	
+	/**
+	 * Strip illegal root 12/13/80; rebuild outbound AE body tag order per FINRA v2.1.
+	 * §5.1.6 SPEN — {@link FinraSpAckBodyReorder}; §5.2.2 TSEN — {@link FinraTsAckBodyReorder}; §5.1.6 CAEN — {@link FinraCaenBodyReorder}.
+	 * Non-EN acks: TS → {@link FinraTsAckBodyReorder}; SP/CA → {@link FinraTraceAeAckBodyReorder} (SP trailing differs from CA).
+	 */
+	private void applyAePricingEchoAndFinraCaenOrder(TradeCaptureReport req, TradeCaptureReport res) {
+		GatewayAllocQtyEcho.stripRootLevelPricingTags(res);
+		try {
+			String suf = null;
+			String prefix = null;
+			if (res.isSetField(1011)) {
+				StringField sf1011 = new StringField(1011);
+				res.getField(sf1011);
+				String ev = sf1011.getValue();
+				if (ev != null && ev.length() >= 2) {
+					suf = ev.substring(ev.length() - 2);
+					prefix = ev.substring(0, 2);
+				}
+			}
+			if ("EN".equals(suf)) {
+				if ("SP".equals(prefix)) {
+					FinraSpAckBodyReorder.reorderSpenAcknowledgementBody(res);
+				} else if ("TS".equals(prefix)) {
+					FinraTsAckBodyReorder.reorderTsenAcknowledgementBody(res);
+				} else {
+					FinraCaenBodyReorder.reorderCaenAcknowledgementBody(res);
+				}
+			} else if ("TS".equals(prefix)) {
+				FinraTsAckBodyReorder.reorderFinraTsAckBody(res);
+			} else {
+				FinraTraceAeAckBodyReorder.reorderFinraAckBody(res);
+			}
+		} catch (Exception e) {
+			log.trace("applyAePricingEchoAndFinraCaenOrder: {}", e.getMessage());
+		}
+	}
+
+	/** After pricing strip on cancel/reversal/allege responses: Treasury §5.2.x vs SP/CA §5.1.x / §5.2.x. */
+	private void reorderAckBodyAfterStrip(TradeCaptureReport msg) {
+		try {
+			if (!msg.isSetField(1011)) {
+				return;
+			}
+			StringField sf1011 = new StringField(1011);
+			msg.getField(sf1011);
+			String ev = sf1011.getValue();
+			if (ev == null || ev.length() < 2) {
+				return;
+			}
+			String prefix = ev.substring(0, 2);
+			if ("TS".equals(prefix)) {
+				FinraTsAckBodyReorder.reorderFinraTsAckBody(msg);
+			} else {
+				FinraTraceAeAckBodyReorder.reorderFinraAckBody(msg);
+			}
+		} catch (Exception e) {
+			log.trace("reorderAckBodyAfterStrip: {}", e.getMessage());
+		}
+	}
+
 	/**
 	 * Ensure mandatory FIX / FINRA TRACE fields are present on outgoing AE (TradeCaptureReport) to Trace gateway (initiator).
 	 * Only applied to responses we send; never modifies incoming messages.
@@ -1869,8 +1936,12 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 	}
 
-	/** Build first side for CAEN/SPEN/TSEN: 54=2, 37=NONE, 453=1, 448=JPMS, 447=C, 452=1, 802=1, 523=T, 803=24, 528=P, 58=UBS. */
-	private quickfix.fix44.TradeCaptureReport.NoSides buildFirstSideForEN() {
+	/**
+	 * First side for CAEN/SPEN/TSEN: parties … 528=P → CommissionData(12,13)? → 58=UBS → NoAllocs(79,80).
+	 * Per FIX 4.4, allocation quantity belongs under {@code NoSides.NoAllocs}; delimiter {@code AllocAccount} (79) must precede {@code AllocQty} (80).
+	 */
+	private quickfix.fix44.TradeCaptureReport.NoSides buildFirstSideForEN(Double commission, Character commType, Double allocQty,
+			String allocAccount) {
 		quickfix.fix44.TradeCaptureReport.NoSides sidesGroup = new quickfix.fix44.TradeCaptureReport.NoSides();
 		sidesGroup.set(new Side('2'));
 		sidesGroup.set(new OrderID("NONE"));
@@ -1884,7 +1955,23 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		partyIdsGroup.addGroup(subGrp);
 		sidesGroup.addGroup(partyIdsGroup);
 		sidesGroup.set(new OrderCapacity('P'));
+		if (commission != null || commType != null) {
+			CommissionData cd = new CommissionData();
+			if (commission != null) {
+				cd.set(new Commission(commission.doubleValue()));
+			}
+			if (commType != null) {
+				cd.set(new CommType(commType.charValue()));
+			}
+			sidesGroup.set(cd);
+		}
 		sidesGroup.set(new Text("UBS"));
+		if (allocQty != null) {
+			quickfix.fix44.TradeCaptureReport.NoSides.NoAllocs allocGrp = new quickfix.fix44.TradeCaptureReport.NoSides.NoAllocs();
+			allocGrp.set(new AllocAccount(GatewayAllocQtyEcho.allocAccountForOutbound(allocAccount)));
+			allocGrp.set(new AllocQty(allocQty.doubleValue()));
+			sidesGroup.addGroup(allocGrp);
+		}
 		return sidesGroup;
 	}
 
@@ -1928,28 +2015,30 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		try { msg.removeField(22036); } catch (Exception e) { log.trace("Remove 22036 from HX: {}", e.getMessage()); }
 	}
 
+	/**
+	 * Removes all {@code NoSides} instances so {@code NoSides} (552) matches how many groups we add next.
+	 * JPMS rejects 552 when it does not equal the actual repeating-group count (including leftover sides after partial replace).
+	 */
+	private void clearAllNoSides(TradeCaptureReport msg) {
+		try {
+			msg.removeField(552);
+		} catch (Exception e) {
+			log.trace("clearAllNoSides: {}", e.getMessage());
+		}
+	}
+
 	/** For CAHX/SPHX/TSHX: ensure 552=2 with two sides matching valid format (first side 453=2 TEST/JPMB, 528/58; second side C/17). */
 	private void ensureHXHasTwoSidesWithStructure(TradeCaptureReport msg) {
 		String eventSource = null;
 		try { eventSource = msg.getField(new StringField(1011)).getValue(); } catch (Exception e) { return; }
 		if (eventSource == null || !eventSource.endsWith("HX")) return;
 		try {
-			int n = msg.getNoSides().getValue();
 			quickfix.fix44.TradeCaptureReport.NoSides firstSide = buildFirstSideForHX();
 			quickfix.fix44.TradeCaptureReport.NoSides secondSide = buildSecondSideForHX();
-			if (n == 0) {
-				msg.addGroup(firstSide);
-				msg.addGroup(secondSide);
-				log.debug("ensureHXHasTwoSidesWithStructure: added two sides for HX.");
-			} else if (n == 1) {
-				msg.replaceGroup(1, firstSide);
-				msg.addGroup(secondSide);
-				log.debug("ensureHXHasTwoSidesWithStructure: replaced first side and added second for HX.");
-			} else {
-				msg.replaceGroup(1, firstSide);
-				msg.replaceGroup(2, secondSide);
-				log.debug("ensureHXHasTwoSidesWithStructure: replaced both sides for HX.");
-			}
+			clearAllNoSides(msg);
+			msg.addGroup(firstSide);
+			msg.addGroup(secondSide);
+			log.debug("ensureHXHasTwoSidesWithStructure: set exactly two sides for HX.");
 		} catch (Exception e) { log.trace("ensureHXHasTwoSidesWithStructure: {}", e.getMessage()); }
 	}
 
@@ -1965,29 +2054,21 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	}
 
 	/** For CAEN/SPEN/TSEN and CACR/SPCR/TSCR: ensure 552=2 with two sides matching valid format (first side 802/523/803/528/58, second side BCAP/17). */
-	private void ensureENHasTwoSidesWithStructure(TradeCaptureReport msg) {
+	private void ensureENHasTwoSidesWithStructure(TradeCaptureReport msg, TradeCaptureReport inboundRequest) {
 		String eventSource = null;
 		try { eventSource = msg.getField(new StringField(1011)).getValue(); } catch (Exception e) { return; }
 		if (eventSource == null || eventSource.length() < 2) return;
 		String suffix = eventSource.substring(eventSource.length() - 2);
 		if (!"EN".equals(suffix) && !"CR".equals(suffix)) return;
 		try {
-			int n = msg.getNoSides().getValue();
-			quickfix.fix44.TradeCaptureReport.NoSides firstSide = buildFirstSideForEN();
+			GatewayAllocQtyEcho.InboundSidePricing pricing = GatewayAllocQtyEcho.extractInboundSidePricing(inboundRequest);
+			quickfix.fix44.TradeCaptureReport.NoSides firstSide = buildFirstSideForEN(
+					pricing.commission, pricing.commType, pricing.allocQty, pricing.allocAccount);
 			quickfix.fix44.TradeCaptureReport.NoSides secondSide = buildSecondSideForEN();
-			if (n == 0) {
-				msg.addGroup(firstSide);
-				msg.addGroup(secondSide);
-				log.debug("ensureENHasTwoSidesWithStructure: added two sides for EN.");
-			} else if (n == 1) {
-				msg.replaceGroup(1, firstSide);
-				msg.addGroup(secondSide);
-				log.debug("ensureENHasTwoSidesWithStructure: replaced first side and added second for EN.");
-			} else {
-				msg.replaceGroup(1, firstSide);
-				msg.replaceGroup(2, secondSide);
-				log.debug("ensureENHasTwoSidesWithStructure: replaced both sides for EN.");
-			}
+			clearAllNoSides(msg);
+			msg.addGroup(firstSide);
+			msg.addGroup(secondSide);
+			log.debug("ensureENHasTwoSidesWithStructure: set exactly two sides for EN.");
 		} catch (Exception e) { log.trace("ensureENHasTwoSidesWithStructure: {}", e.getMessage()); }
 	}
 
@@ -1998,14 +2079,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		if (eventSource == null || !eventSource.endsWith("CX")) return;
 		try {
 			quickfix.fix44.TradeCaptureReport.NoSides cxSide = buildSidesGroup('2', "JPMS", 1); // 54=2, 37=NONE, 448=JPMS, 447=C, 452=1
-			int n = msg.getNoSides().getValue();
-			if (n == 0) {
-				msg.addGroup(cxSide);
-			} else {
-				msg.replaceGroup(1, cxSide);
-			}
-			msg.setField(new quickfix.field.NoSides(1)); // valid CX has 552=1
-			log.debug("ensureCXHasOneSideWithStructure: set 552=1, one side (54=2, JPMS).");
+			clearAllNoSides(msg);
+			msg.addGroup(cxSide);
+			log.debug("ensureCXHasOneSideWithStructure: set exactly one side for CX (552=1).");
 		} catch (Exception e) { log.trace("ensureCXHasOneSideWithStructure: {}", e.getMessage()); }
 	}
 	
