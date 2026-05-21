@@ -476,7 +476,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		try { msgType = arg0.getHeader().getField(new MsgType()).getValue(); } catch (FieldNotFound ignored) { }
 
 		// Reject Logon before pending-delay handling so LogOnRejectRequired=Y always applies to that session.
-		if ("A".equals(msgType) && logonRequiredFromConfig && logOnRejectRequiredForSession(arg1)) {
+		if ("A".equals(msgType) && logonRequiredEffective(arg1) && logOnRejectRequiredForSession(arg1)) {
 			log.warn("{}: LogOnRejectRequired=Y — rejecting Logon for session {}", simulatorRoleFromConfig, arg1);
 			String reason = "Logon rejected (LogOnRejectRequired=Y for this session)";
 			boolean rejectOnWire = sendSessionLevelRejectForIncomingLogon(arg1, arg0, reason);
@@ -488,7 +488,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			log.info("Ignoring admin message until we send Logon/Heartbeat back to initiator: [ {} ]", arg0.toString());
 			return;
 		}
-		if (!logonRequiredFromConfig) {
+		if (!logonRequiredEffective(arg1)) {
 			log.info("Picked message from initiator: [ {} ]. Since we configured LogonRequired=N, not sending any response to initiator.", arg0.toString());
 			if ("A".equals(msgType)) {
 				String reason = "LogonRequired=N: simulator does not send Logon";
@@ -498,19 +498,19 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			return;
 		}
 		if ("A".equals(msgType)) {
-			// Use values read from config at startup (primary or secondary)
-			if (logonDelayFromConfig && logonDelaySecsFromConfig > 0) {
-				log.info("LogonDelay=Y, LogonDelayinSecs={} ({} — from config loaded at startup)", logonDelaySecsFromConfig, simulatorRoleFromConfig);
+			int logonDelaySecs = logonDelaySecsEffective(arg1);
+			if (logonDelayEffective(arg1) && logonDelaySecs > 0) {
+				log.info("LogonDelay=Y, LogonDelayinSecs={} ({} — session or [default] config)", logonDelaySecs, simulatorRoleFromConfig);
 					pendingLogonResponseSessions.add(arg1);
-					log.warn("LogonDelay=Y: waiting {}s before accepting logon. Ignoring all messages until we send Logon back. Ensure the initiator's logon response timeout is greater than {}s.", logonDelaySecsFromConfig, logonDelaySecsFromConfig);
+					log.warn("LogonDelay=Y: waiting {}s before accepting logon. Ignoring all messages until we send Logon back. Ensure the initiator's logon response timeout is greater than {}s.", logonDelaySecs, logonDelaySecs);
 					try {
-						Thread.sleep(logonDelaySecsFromConfig * 1000L);
+						Thread.sleep(logonDelaySecs * 1000L);
 					} catch (InterruptedException e) {
 						Thread.currentThread().interrupt();
 						pendingLogonResponseSessions.remove(arg1);
 						log.warn("Logon delay interrupted");
 					}
-					log.info("LogonDelay: {}s elapsed, accepting logon and sending Logon to initiator for session {}", logonDelaySecsFromConfig, arg1);
+					log.info("LogonDelay: {}s elapsed, accepting logon and sending Logon to initiator for session {}", logonDelaySecs, arg1);
 			}
 			// On receiving Logon: align sequence so engine sends correct 789 and we accept initiator's next message.
 			// QuickFIX/J engine sends 789 = getNextTargetMsgSeqNum() + 1, then increments store. So we set store to
@@ -690,19 +690,19 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			String msgType = arg0.getHeader().getField(new MsgType()).getValue();
 			if ("A".equals(msgType)) {
 				pendingLogonResponseSessions.remove(arg1);
-				if (!logonRequiredFromConfig) {
+				if (!logonRequiredEffective(arg1)) {
 					log.info("LogonRequired=N: not sending any response (Logon) to initiator for session {}", arg1);
 					throwDoNotSend();
 				}
 			}
 			if ("0".equals(msgType)) {
 				pendingHeartbeatResponseSessions.remove(arg1);
-				if (!heartBeatRequiredFromConfig) {
+				if (!heartBeatRequiredEffective(arg1)) {
 					log.info("HeartBeat_Required=N: not sending Heartbeat to initiator for session {}", arg1);
 					throwDoNotSend();
 				}
-				if (heartBeatRequiredFromConfig && heartBtDelayFromConfig) {
-					int secs = heartBtDelayTimeFromConfig;
+				if (heartBeatRequiredEffective(arg1) && heartBtDelayEffective(arg1)) {
+					int secs = heartBtDelayTimeEffective(arg1);
 					if (secs > 0) {
 						pendingHeartbeatResponseSessions.add(arg1);
 						log.warn("HeartBtDelay=Y: waiting {}s before sending Heartbeat. App messages (trades) are queued and will be reported after delay.", secs);
@@ -862,6 +862,42 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		} catch (Exception ignored) {
 			return defaultValue;
 		}
+	}
+
+	private boolean logonRequiredEffective(SessionID sid) {
+		return getBoolSetting(sid, "LogonRequired", logonRequiredFromConfig);
+	}
+
+	private boolean logonDelayEffective(SessionID sid) {
+		return getBoolSetting(sid, "LogonDelay", logonDelayFromConfig);
+	}
+
+	private int logonDelaySecsEffective(SessionID sid) {
+		return getIntSetting(sid, "LogonDelayinSecs", logonDelaySecsFromConfig);
+	}
+
+	private boolean heartBeatRequiredEffective(SessionID sid) {
+		return getBoolSetting(sid, "HeartBeat_Required", heartBeatRequiredFromConfig);
+	}
+
+	private boolean heartBtDelayEffective(SessionID sid) {
+		return getBoolSetting(sid, "HeartBtDelay", heartBtDelayFromConfig);
+	}
+
+	private int heartBtDelayCountEffective(SessionID sid) {
+		return getIntSetting(sid, "HeartBtDelayCount", heartBtDelayCountFromConfig);
+	}
+
+	private int heartBtDelayTimeEffective(SessionID sid) {
+		return getIntSetting(sid, "HeartBtDelayTime", heartBtDelayTimeFromConfig);
+	}
+
+	private boolean responseMsgDelayEffective(SessionID sid) {
+		return getBoolSetting(sid, "ResponseMsgDelay", responseMsgDelayFromConfig);
+	}
+
+	private int responseMsgDelayTimeEffective(SessionID sid) {
+		return getIntSetting(sid, "ResponseMsgDelayTime", responseMsgDelayTimeFromConfig);
 	}
 
 	/** Require key in config; throw ConfigError if missing. No defaults. */
@@ -1034,7 +1070,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			log.info("HeartBtDelay: queued app message (will be reported after delay): [ {} ]", arg0.toString());
 			return;
 		}
-		if (!logonRequiredFromConfig) {
+		if (!logonRequiredEffective(arg1)) {
 			log.info("Picked message from initiator: [ {} ]. Since we configured LogonRequired=N, not sending any response to initiator.", arg0.toString());
 			return;
 		}
@@ -1131,11 +1167,12 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	// TradeReportTransType : 0=new, 1=cancel, 2=Replace, ----------IN
 	public void onMessage(TradeCaptureReport msg, SessionID sessionID) throws FieldNotFound, SessionNotFound, ConfigError, FieldConvertError, InterruptedException {
 		
-		if (responseMsgDelayFromConfig && responseMsgDelayTimeFromConfig > 0) {
+		int delaySecs = responseMsgDelayTimeEffective(sessionID);
+		if (responseMsgDelayEffective(sessionID) && delaySecs > 0) {
 			System.out.println();
-			System.out.println("Response processing delay time is :: " + responseMsgDelayTimeFromConfig);
+			System.out.println("Response processing delay time is :: " + delaySecs);
 			try {
-				Thread.sleep(responseMsgDelayTimeFromConfig * 1000L);
+				Thread.sleep(delaySecs * 1000L);
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 			}
@@ -2123,12 +2160,15 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			
 			if ( senderCompID.equalsIgnoreCase(sessionID.getSenderCompID())) {
 				heartbeatcount++;
-				if (heartBeatRequiredFromConfig) {
+				if (heartBeatRequiredEffective(sessionID)) {
+					boolean hbDelay = heartBtDelayEffective(sessionID);
+					int hbDelayCount = heartBtDelayCountEffective(sessionID);
+					int hbDelayTime = heartBtDelayTimeEffective(sessionID);
 					log.info("HeartBtDelay :: {} \t HeartBtDelayCount :: {} Current HeartBtCount :: {}",
-						heartBtDelayFromConfig, heartBtDelayCountFromConfig, heartbeatcount);
-					if (heartBtDelayFromConfig && heartbeatcount == heartBtDelayCountFromConfig) {
-						log.info("Heart Beat Delay Time is [{}]", heartBtDelayTimeFromConfig);
-						Thread.sleep(heartBtDelayTimeFromConfig * 1000L);
+						hbDelay, hbDelayCount, heartbeatcount);
+					if (hbDelay && heartbeatcount == hbDelayCount) {
+						log.info("Heart Beat Delay Time is [{}]", hbDelayTime);
+						Thread.sleep(hbDelayTime * 1000L);
 						log.info("Heartbeat message from FINRA-{} to Gateway is :: {}", simulatorRoleFromConfig.toUpperCase(), msg.toString());
 						heartbeatcount = 0;
 					}

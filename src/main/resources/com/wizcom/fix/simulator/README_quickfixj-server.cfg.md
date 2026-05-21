@@ -104,8 +104,8 @@ This document describes **every** setting in `quickfixj-server.cfg`: what it doe
 |-------|--------|----------------|
 | **ResponseMsgDelay** | Y \| N | **WizFixApplication:** Y = add an artificial delay of **ResponseMsgDelayTime** seconds before processing each incoming trade (onMessage). N = process immediately. |
 | **ResponseMsgDelayTime** | integer seconds | **WizFixApplication:** Delay in seconds when ResponseMsgDelay=Y. |
-| **TraceNotAvailable** | Y \| N | **WizFixApplication:** Initial value of “trace not available” flag. When true, incoming trades get REJ (reject) instead of SPEN. |
-| **TraceNotAvailableIntervel** | integer seconds (e.g. 120) | **WizFixApplication:** When TraceNotAvailable is enabled, a timer toggles the trace-not-available flag every this many seconds (for testing reject behavior). |
+| **TraceNotAvailable** | Y \| N | **WizFixApplication:** Global only (**[default]**). Initial “trace not available” flag; when true, incoming trades get REJ instead of SPEN on all sessions. |
+| **TraceNotAvailableIntervel** | integer seconds (e.g. 120) | **WizFixApplication:** Global only (**[default]**). When TraceNotAvailable=Y, timer toggles the flag every N seconds (all sessions). |
 
 ---
 
@@ -193,14 +193,20 @@ Set on each **`[session]`** block that needs it (not required in `[default]`). *
 
 ## [session] — Per-session overrides
 
-Each **[session]** block defines one session (e.g. SP, CA, TS). It inherits [default] and overrides:
+Each **[session]** block defines one session (e.g. SP, CA, TS). It inherits **[default]** and may override simulator behavior and timeout keys.
 
 | Field | Values | How it is used |
 |-------|--------|----------------|
 | **TargetSubID** | e.g. 44B1, 44B2, 44B3 | **QuickFIX/J:** Initiator’s SubID. With SenderSubID defines session (e.g. FNRA/SP ↔ JPMS/44B1). |
 | **SenderSubID** | e.g. SP, CA, TS | **QuickFIX/J:** Our SubID (product). |
-| **SocketAcceptPort** | port (e.g. 64034) | **Simulator / QuickFIX/J:** Acceptor listen port for this session. Each session uses a different port (64034 SP, 64093 CA, 64094 TS). |
+| **SocketAcceptPort** | port (e.g. 45001) | **Simulator / QuickFIX/J:** Acceptor listen port for this session. |
 | **NonStopSession** | Y \| N | **QuickFIX/J:** Override for this session (allow logon 24/7). |
+| **HeartBeat_Required**, **HeartBtDelay**, **HeartBtDelayCount**, **HeartBtDelayTime** | Y/N, integers | **WizFixApplication:** Per-session override; omitted → **[default]**. |
+| **LogonRequired**, **LogonDelay**, **LogonDelayinSecs** | Y/N, integer | **WizFixApplication:** Per-session override; omitted → **[default]**. |
+| **ResponseMsgDelay**, **ResponseMsgDelayTime** | Y/N, integer | **WizFixApplication:** Per-session override; omitted → **[default]**. |
+| **SendLogout_at_Shutdown** | Y \| N | **Simulator:** Per-session override on shutdown; omitted → **[default]**. |
+| **SessionTimeoutRequired**, **SessionTimeoutSeconds**, **isLogoutRequiredatSessionTimeout** | True/False, integer | **WizFixApplication:** Wall-clock timeout for that session only. |
+| **LogOnRejectRequired** | Y \| N | **WizFixApplication:** Reject Logon for that session only. |
 
 Optional (not in current file but supported):
 
@@ -213,8 +219,9 @@ Optional (not in current file but supported):
 
 | Used by | Settings |
 |---------|----------|
-| **Simulator (startup, JDBC, shutdown)** | SimulatorRole, LogToFile, LogToDB, LogToScreen, UseJdbcStore, SendLogout_at_Shutdown, SessionTimeoutRequired, SessionTimeoutSeconds, isLogoutRequiredatSessionTimeout, SessionDateZone, JdbcURL, JdbcUser, JdbcPassword, JdbcDriver, JdbcStoreSessionsTableName, JdbcStoreMessagesTableName, JdbcLogIncomingTable, JdbcLogOutgoingTable, JdbcLogEventTable |
-| **WizFixApplication (behavior)** | LogonRequired, LogonDelay, LogonDelayinSecs, HeartBeat_Required, HeartBtDelay, HeartBtDelayCount, HeartBtDelayTime, ResponseMsgDelay, ResponseMsgDelayTime, TraceNotAvailable, TraceNotAvailableIntervel |
+| **Simulator (startup, JDBC, shutdown)** | SimulatorRole, LogToFile, LogToDB, LogToScreen, UseJdbcStore, SendLogout_at_Shutdown (per [session] or [default]), SessionDateZone, JdbcURL, JdbcUser, JdbcPassword, JdbcDriver, JdbcStoreSessionsTableName, JdbcStoreMessagesTableName, JdbcLogIncomingTable, JdbcLogOutgoingTable, JdbcLogEventTable |
+| **WizFixApplication (behavior)** | LogonRequired, LogonDelay, LogonDelayinSecs, HeartBeat_Required, HeartBtDelay, HeartBtDelayCount, HeartBtDelayTime, ResponseMsgDelay, ResponseMsgDelayTime (per [session] or [default]); TraceNotAvailable, TraceNotAvailableIntervel (**[default]** only, global) |
+| **WizFixApplication (per [session])** | SessionTimeoutRequired, SessionTimeoutSeconds, isLogoutRequiredatSessionTimeout, LogOnRejectRequired |
 | **QuickFIX/J engine** | ConnectionType, SocketAcceptAddress, ResetOnLogon/Logout/Disconnect/Error, SendRedundantResendRequests, RefreshOnLogon, EnableNextExpectedMsgSeqNum, NonStopSession, StartTime, EndTime, CheckLatency, UseDataDictionary, DataDictionary, BeginString, **PersistMessages**, FileStorePath, FileLogPath, FileLogHeartbeats, FileIncludeMilliseconds, FileIncludeTimeStampForMessages, SLF4J* and ScreenLog*, SenderCompID, TargetCompID, JdbcLogHeartBeats |
 | **Session block** | TargetSubID, SenderSubID, SocketAcceptPort, NonStopSession (and optional SocketAcceptAddress, AcceptorTemplate) |
 

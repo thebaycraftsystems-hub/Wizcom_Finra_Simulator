@@ -365,21 +365,36 @@ public class Simulator {
         acceptor.start();
     }
 
+    /** Per-[session] SendLogout_at_Shutdown; falls back to [default] value loaded at startup. */
+    private boolean sendLogoutAtShutdownEffective(SessionID sessionID) {
+        try {
+            if (sessionSettings != null && sessionID != null
+                    && sessionSettings.isSetting(sessionID, "SendLogout_at_Shutdown")) {
+                return sessionSettings.getBool(sessionID, "SendLogout_at_Shutdown");
+            }
+        } catch (Exception ignored) { }
+        return sendLogoutAtShutdown;
+    }
+
     /**
-     * Sends Logout (35=5) to all logged-on sessions when SendLogout_at_Shutdown=Y.
+     * Sends Logout (35=5) to logged-on sessions with SendLogout_at_Shutdown=Y (per session or [default]).
      * After each Logout, persists the next sender sequence to DB (when UseJdbcStore=Y) so the next
      * Logon uses 34=(N+1) instead of reusing 34=N (avoids duplicate MsgSeqNum in TRACE_FIX_MESSAGES_LOG).
+     * @return number of sessions that received Logout
      */
-    private void sendLogoutToAllSessions() {
+    private int sendLogoutToAllSessions() {
         if (sessionSettings == null) {
-            log.info("SendLogout_at_Shutdown=Y: no settings, skipping Logout.");
-            return;
+            log.info("SendLogout_at_Shutdown: no settings, skipping Logout.");
+            return 0;
         }
         try {
             Iterator<SessionID> it = sessionSettings.sectionIterator();
             int sent = 0;
             while (it.hasNext()) {
                 SessionID sessionID = it.next();
+                if (!sendLogoutAtShutdownEffective(sessionID)) {
+                    continue;
+                }
                 try {
                     Session session = Session.lookupSession(sessionID);
                     if (session != null && session.isLoggedOn()) {
@@ -406,7 +421,7 @@ public class Simulator {
                 }
             }
             if (sent == 0) {
-                log.info("SendLogout_at_Shutdown=Y: no logged-on sessions to send Logout.");
+                log.info("SendLogout_at_Shutdown: no logged-on sessions with Y to send Logout.");
             }
             if (sent > 0) {
                 try {
@@ -414,10 +429,12 @@ public class Simulator {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                log.info("SendLogout_at_Shutdown=Y: sent Logout to {} session(s), waiting 1.5s before stop.", sent);
+                log.info("SendLogout_at_Shutdown: sent Logout to {} session(s), waiting 1.5s before stop.", sent);
             }
+            return sent;
         } catch (Exception e) {
             log.warn("SendLogout_at_Shutdown: could not send Logout to sessions: {}", e.getMessage());
+            return 0;
         }
     }
 
@@ -437,10 +454,9 @@ public class Simulator {
             stopped = true;
         }
         log.info("Shutting down FIX Simulator...");
-        if (sendLogoutAtShutdown) {
-            sendLogoutToAllSessions();
-        } else {
-            log.info("SendLogout_at_Shutdown=N: not sending Logout to initiator.");
+        int logoutSent = sendLogoutToAllSessions();
+        if (logoutSent == 0 && !sendLogoutAtShutdown) {
+            log.info("SendLogout_at_Shutdown=N ([default] and no per-session Y): not sending Logout to initiator.");
         }
         try {
             jmxExporter.getMBeanServer().unregisterMBean(connectorObjectName);
@@ -448,11 +464,11 @@ public class Simulator {
             log.debug("Failed to unregister acceptor from JMX: {}", e.getMessage());
         }
         try {
-            // When SendLogout_at_Shutdown=N, use stop(true) so QuickFIX/J does not send Logout (engine's stop() otherwise logs out sessions).
-            // When Y we already sent Logout above; stop(false) lets the engine close cleanly.
-            acceptor.stop(!sendLogoutAtShutdown);
-            if (!sendLogoutAtShutdown) {
-                log.info("SendLogout_at_Shutdown=N: acceptor stopped with forceDisconnect=true (no Logout sent by engine).");
+            // When no session had SendLogout_at_Shutdown=Y, use stop(true) so QuickFIX/J does not send Logout.
+            // When we sent Logout above, stop(false) lets the engine close cleanly.
+            acceptor.stop(logoutSent == 0);
+            if (logoutSent == 0) {
+                log.info("SendLogout_at_Shutdown: acceptor stopped with forceDisconnect=true (no Logout sent by simulator or engine).");
             }
         } catch (Exception e) {
             log.debug("Acceptor stop: {}", e.getMessage());
