@@ -1,0 +1,48 @@
+# FINRA TRACE FIX - Message types and required/conditional fields
+# Derived from FINRA TRACE CA/TS/SP specifications. Do not hardcode in business logic.
+# Version: 2.1 (align with docs/Specification/*/ *_2.1.pdf)
+
+version: "2.1"
+beginString: "FIX.4.4"
+
+admin:
+  Logon:           # 35=A
+    required: [49, 56, 34, 52, 98, 108, 141]
+    conditional: {}
+  Logout:          # 35=5
+    required: [49, 56, 34, 52]
+    conditional: {}
+  Heartbeat:       # 35=0
+    required: [49, 56, 34, 52]
+    conditional: {112: "optional TestReqID"}
+  TestRequest:    # 35=1
+    required: [49, 56, 34, 52, 112]
+    conditional: {}
+  ResendRequest:  # 35=2
+    required: [49, 56, 34, 52, 7, 16]
+    conditional: {}
+  SequenceReset:  # 35=4
+    required: [49, 56, 34, 52, 36]
+    conditional: {123: "GapFill when Y"}
+  Reject:         # 35=3
+    required: [49, 56, 34, 52, 45, 58]
+    conditional: {371, 372, 373}
+
+application:
+  TradeCaptureReport:   # 35=AE
+    required: [571, 32, 31, 75, 60, 552, 54, 37, 17, 48, 22, 55, 38, 152, 153, 939]
+    conditional:
+      487: "TradeReportTransType 0=New, 1=Cancel, 2=Correction, 4=Reversal"
+      22009: "Required for Reversal (4)"
+      22011: "ControlDate - required for NEW/Correction"
+      1003: "TradeID - FINRA Control Number"
+      1126: "OriginalTradeID - for Correction"
+      22012: "OriginalControlDate - for Correction"
+    enums:
+      TradeReportTransType: [0, 1, 2, 4]
+      TradeReportType: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  TradeCaptureReportAck: # 35=AR
+    required: [571, 750, 552, 939]
+    conditional:
+      751: "TradeReportRejectReason when 939=1 (REJECTED)"
+      58: "Text when rejected"

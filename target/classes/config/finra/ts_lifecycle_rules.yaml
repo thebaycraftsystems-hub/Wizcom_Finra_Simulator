@@ -1,0 +1,58 @@
+# FINRA TRACE TS (Treasury) - Lifecycle state machine
+# States and allowed transitions. Used by LifecycleEngine. No hardcoding in business logic.
+
+version: "2.1"
+product: "TS"
+
+states:
+  - NEW_SUBMITTED
+  - ACCEPTED
+  - MATCHED
+  - DNR
+  - CORRECTED
+  - CANCELLED
+  - REJECTED
+  - IGR3_TRIGGERED
+
+# List of allowed transitions: from_state -> event -> next_state
+transitions:
+  - from: NEW_SUBMITTED
+    event: ACCEPT
+    next: ACCEPTED
+    condition: "version 1, first NEW for TradeReportID"
+  - from: NEW_SUBMITTED
+    event: DUPLICATE_NEW
+    next: IGR3_TRIGGERED
+    reject_code: 4053
+  - from: NEW_SUBMITTED
+    event: REJECT
+    next: REJECTED
+  - from: ACCEPTED
+    event: MATCH
+    next: MATCHED
+  - from: ACCEPTED
+    event: CORRECTION
+    next: CORRECTED
+    condition: "version 2, OriginalTradeID/OriginalControlDate"
+  - from: ACCEPTED
+    event: CANCEL
+    next: CANCELLED
+  - from: DNR
+    event: SECOND_NEW
+    next: IGR3_TRIGGERED
+    reject_code: 4063
+  - from: CORRECTED
+    event: CANCEL
+    next: CANCELLED
+
+invalid_transition_reject_code: 4055
+correction_without_accept_reject_code: 4064
+
+version_rules:
+  NEW: 1
+  CORRECTION: 2
+
+validation:
+  TradeReportID_uniqueness: true
+  Reportable_flag: true
+  MPID_validation: true

@@ -1,0 +1,76 @@
+# FINRA TRACE SP (Securitized Products) - Validation rules
+# Rule-driven; used by SpecValidationEngine. No hardcoding in business logic.
+
+version: "2.1"
+product: "SP"
+
+# Required in FIX but can be ignored: if missing, do not reject; treat trade as valid and build valid response (no SPRE to initiator).
+required_but_ignored: [37, 17]
+# 37 = OrderID, 17 = ExecID (required in FIX but ignored per specification)
+
+TradeCaptureReport:
+  required_tags:
+    - tag: 571
+      name: TradeReportID
+      type: String
+      maxLength: 64
+    - tag: 32
+      name: LastQty
+      type: Qty
+    - tag: 31
+      name: LastPx
+      type: Price
+    - tag: 75
+      name: TradeDate
+      type: LocalMktDate
+    - tag: 60
+      name: TransactTime
+      type: UTCTimestamp
+    - tag: 552
+      name: NoSides
+      type: NumInGroup
+    - tag: 54
+      name: Side
+      type: int
+      # Valid values: 1=BUY, 2=Sell only
+      enum: [1, 2]
+    - tag: 37
+      name: OrderID
+      type: String
+    - tag: 17
+      name: ExecID
+      type: String
+    - tag: 48
+      name: SecurityID
+      type: String
+    - tag: 22
+      name: SecurityIDSource
+      type: int
+    # 55 Symbol, 38 OrderQty - NOT in specification; do not require
+    - tag: 152
+      name: SettlDate
+      type: LocalMktDate
+    - tag: 153
+      name: SettlType
+      type: int
+    - tag: 939
+      name: TradeReportType
+      type: int
+  conditional_by_trans_type:
+    "0":  # NEW
+      required: [487, 22011]
+      optional: [1003, 752]
+    "1":  # CANCEL
+      required: [487, 569]
+      optional: [22009]
+    "2":  # CORRECTION
+      required: [487, 569, 22011, 22012, 1003, 1126]
+    "4":  # REVERSAL
+      required: [487, 22009]
+  enumerations:
+    TradeReportTransType: [0, 1, 2, 4]
+    TradeReportType: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  field_lengths:
+    571: 64
+    48: 12
+    58: 256
