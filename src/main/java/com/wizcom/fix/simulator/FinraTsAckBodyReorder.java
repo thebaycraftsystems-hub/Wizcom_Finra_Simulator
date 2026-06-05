@@ -147,7 +147,7 @@ public final class FinraTsAckBodyReorder {
 				sides.add(g);
 			}
 
-			Map<Integer, String> full = snapshotRootScalars(msg);
+			Map<Integer, String> full = FinraAeBodyReorderUtil.snapshotRootScalars(msg);
 			for (Integer tag : full.keySet()) {
 				try {
 					msg.removeField(tag.intValue());
@@ -165,28 +165,18 @@ public final class FinraTsAckBodyReorder {
 				captured.remove(t);
 			}
 
-			applyOrderedTags(msg, preBlock, captured);
+			FinraAeBodyReorderUtil.applyOrderedTags(msg, preBlock, captured);
 			if (hasInstrument) {
 				msg.set(inst);
 			}
-			applyOrderedTags(msg, midBlock, captured);
+			FinraAeBodyReorderUtil.applyOrderedTags(msg, midBlock, captured);
 
 			for (TradeCaptureReport.NoSides side : sides) {
 				msg.addGroup(side);
 			}
 
-			applyOrderedTags(msg, postBlock, captured);
-
-			for (Map.Entry<Integer, String> e : captured.entrySet()) {
-				if (e.getKey() == null || e.getValue() == null) {
-					continue;
-				}
-				try {
-					msg.setField(new StringField(e.getKey(), e.getValue()));
-				} catch (Exception ex) {
-					log.trace("append leftover tag {}: {}", e.getKey(), ex.getMessage());
-				}
-			}
+			FinraAeBodyReorderUtil.applyOrderedTags(msg, postBlock, captured);
+			FinraAeBodyReorderUtil.appendLeftoverRootTags(msg, captured);
 		} catch (Exception e) {
 			log.warn("FinraTsAckBodyReorder: {}", e.getMessage());
 		}
@@ -209,31 +199,4 @@ public final class FinraTsAckBodyReorder {
 		}
 	}
 
-	private static Map<Integer, String> snapshotRootScalars(TradeCaptureReport msg) throws FieldNotFound {
-		Map<Integer, String> captured = new LinkedHashMap<>();
-		for (int tag = 1; tag <= 23000; tag++) {
-			if (tag == 552) {
-				continue;
-			}
-			if (msg.isSetField(tag)) {
-				StringField sf = new StringField(tag);
-				msg.getField(sf);
-				captured.put(tag, sf.getValue());
-			}
-		}
-		return captured;
-	}
-
-	private static void applyOrderedTags(TradeCaptureReport msg, int[] order, Map<Integer, String> captured) {
-		for (int tag : order) {
-			String val = captured.remove(tag);
-			if (val != null) {
-				try {
-					msg.setField(new StringField(tag, val));
-				} catch (Exception e) {
-					log.trace("set ordered tag {}: {}", tag, e.getMessage());
-				}
-			}
-		}
-	}
 }

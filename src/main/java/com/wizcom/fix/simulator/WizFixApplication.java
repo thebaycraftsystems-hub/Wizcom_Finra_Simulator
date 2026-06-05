@@ -1240,6 +1240,18 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	}
 
 	public void toApp(Message msg, SessionID arg1) throws DoNotSend {
+		try {
+			if (msg.getHeader().isSetField(MsgType.FIELD) && "AE".equals(msg.getHeader().getString(MsgType.FIELD))) {
+				boolean possDup = msg.getHeader().isSetField(PossDupFlag.FIELD)
+						&& msg.getHeader().getBoolean(PossDupFlag.FIELD);
+				if (possDup) {
+					log.debug("toApp: normalizing PossDup AE (43=Y) to same FINRA tag order as first send.");
+				}
+				prepareAeMessageForWire(msg);
+			}
+		} catch (FieldNotFound e) {
+			log.trace("toApp AE wire prep: {}", e.getMessage());
+		}
 		log.info("Response message sending :: [ "+msg.toString() +" ]");
 		/**TradeCaptureReport resTrdCapRpt = (TradeCaptureReport) msg;
 		try {
@@ -1411,22 +1423,140 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		Session.sendToTarget(resTrdCapRpt, sessionID);
 	}
 	
+	/**
+	 * Before {@code stripNoSidesTagsFromRoot} on resend (43=Y): stored AE may have 552=N but side tags only on the root.
+	 * Stripping without rebuilding leaves NumInGroup mismatch (JPMS 373=16). Rebuild NoSides from 1011 when needed.
+	 */
+	private void repairOutboundAeNoSidesForWire(TradeCaptureReport msg) {
+		int declared;
+		try {
+			declared = msg.getNoSides().getValue();
+		} catch (FieldNotFound e) {
+			return;
+		}
+		if (declared < 1) {
+			return;
+		}
+		int populated = FinraAeBodyReorderUtil.countPopulatedNoSides(msg);
+		if (populated >= declared) {
+			return;
+		}
+		log.info("AE wire repair: NoSides declared={} populated={} (resend or legacy store) — rebuilding side groups.", declared, populated);
+
+		if (populated == 0 && FinraAeBodyReorderUtil.hasRootSideTags(msg)) {
+			try {
+				TradeCaptureReport.NoSides g = buildSidesGroupFromRootFlatTags(msg);
+				if (g != null) {
+					FinraAeBodyReorderUtil.clearNoSides(msg);
+					msg.addGroup(g);
+					populated = 1;
+				}
+			} catch (Exception e) {
+				log.trace("relocate flat root side tags: {}", e.getMessage());
+			}
+		}
+
+		populated = FinraAeBodyReorderUtil.countPopulatedNoSides(msg);
+		if (populated >= declared) {
+			return;
+		}
+
+		String eventSource = null;
+		try {
+			eventSource = msg.getField(new StringField(1011)).getValue();
+		} catch (Exception ignored) {
+		}
+		if (eventSource != null && eventSource.length() >= 2) {
+			String suffix = eventSource.substring(eventSource.length() - 2);
+			if ("EN".equals(suffix) || "CR".equals(suffix)) {
+				ensureENHasTwoSidesWithStructure(msg, msg);
+				return;
+			}
+			if ("HX".equals(suffix)) {
+				ensureHXHasTwoSidesWithStructure(msg);
+				return;
+			}
+			if ("CX".equals(suffix)) {
+				ensureCXHasOneSideWithStructure(msg);
+				return;
+			}
+		}
+		ensureResponseHasSides(msg);
+	}
+
+	/**
+	 * Single outbound AE wire pipeline: repair NoSides → FINRA reorder → strip illegal root tags → sync 552.
+	 * Used on first send ({@code applyAePricingEchoAndFinraCaenOrder}) and every {@code toApp} (including 43=Y resend).
+	 */
+	private void prepareOutboundAeForWire(TradeCaptureReport msg) {
+		repairOutboundAeNoSidesForWire(msg);
+		FinraAeBodyReorderUtil.reorderOutboundAeBody(msg);
+		FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
+		int declared = 0;
+		try {
+			declared = msg.getNoSides().getValue();
+		} catch (FieldNotFound ignored) {
+		}
+		if (declared > 0 && FinraAeBodyReorderUtil.countPopulatedNoSides(msg) < declared) {
+			repairOutboundAeNoSidesForWire(msg);
+			FinraAeBodyReorderUtil.reorderOutboundAeBody(msg);
+			FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
+		}
+		FinraAeBodyReorderUtil.syncNoSidesCountToPopulatedGroups(msg);
+	}
+
+	/**
+	 * Prepare AE on the message QuickFIX will send. PossDup (43=Y) uses the same pipeline as first send.
+	 * Non-{@link TradeCaptureReport} instances are round-tripped through a TCR so group repair/reorder applies.
+	 */
+	private void prepareAeMessageForWire(Message msg) {
+		if (msg instanceof TradeCaptureReport) {
+			prepareOutboundAeForWire((TradeCaptureReport) msg);
+			return;
+		}
+		try {
+			String raw = msg.toString();
+			TradeCaptureReport tcr = new TradeCaptureReport();
+			tcr.fromString(raw, null, false);
+			prepareOutboundAeForWire(tcr);
+			msg.fromString(tcr.toString(), null, false);
+		} catch (Exception e) {
+			log.trace("prepareAeMessageForWire round-trip: {} — strip root only", e.getMessage());
+			FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
+		}
+	}
+
+	/** One NoSides from flat root 54/37/447/448/452/453 (legacy stored resend layout). */
+	private TradeCaptureReport.NoSides buildSidesGroupFromRootFlatTags(TradeCaptureReport msg) {
+		try {
+			char sideVal = '1';
+			if (msg.isSetField(54)) {
+				StringField sf = new StringField(54);
+				msg.getField(sf);
+				String v = sf.getValue();
+				if (v != null && !v.isEmpty()) {
+					sideVal = v.charAt(0);
+				}
+			}
+			String partyId = "SIM";
+			int partyRole = 1;
+			if (msg.isSetField(448)) {
+				partyId = msg.getString(448);
+			}
+			if (msg.isSetField(452)) {
+				partyRole = msg.getInt(452);
+			}
+			return buildSidesGroup(sideVal, partyId, partyRole);
+		} catch (Exception e) {
+			log.trace("buildSidesGroupFromRootFlatTags: {}", e.getMessage());
+			return null;
+		}
+	}
+
 	/** On outgoing AE to initiator: remove from message BODY only tags that must not appear at body level.
 	 * 37, 54, 44, 447, 448, 452, 453, 58, 523, 528, 802, 803 only valid inside NoSides groups; initiator rejects them at body (e.g. "Tag not defined, field=58"). */
 	private void removeOrderIDFromTradeCaptureReport(TradeCaptureReport msg) {
-		try { msg.removeField(37); } catch (Exception e) { log.trace("Remove 37 from body: {}", e.getMessage()); }
-		try { msg.removeField(54); } catch (Exception e) { log.trace("Remove 54 from body: {}", e.getMessage()); }
-		try { msg.removeField(44); } catch (Exception e) { log.trace("Remove 44 from body: {}", e.getMessage()); }
-		try { msg.removeField(447); } catch (Exception e) { log.trace("Remove 447 from body: {}", e.getMessage()); }
-		try { msg.removeField(448); } catch (Exception e) { log.trace("Remove 448 from body: {}", e.getMessage()); }
-		try { msg.removeField(452); } catch (Exception e) { log.trace("Remove 452 from body: {}", e.getMessage()); }
-		try { msg.removeField(453); } catch (Exception e) { log.trace("Remove 453 from body: {}", e.getMessage()); }
-		try { msg.removeField(58); } catch (Exception e) { log.trace("Remove 58 from body: {}", e.getMessage()); }
-		try { msg.removeField(523); } catch (Exception e) { log.trace("Remove 523 from body: {}", e.getMessage()); }
-		try { msg.removeField(528); } catch (Exception e) { log.trace("Remove 528 from body: {}", e.getMessage()); }
-		try { msg.removeField(802); } catch (Exception e) { log.trace("Remove 802 from body: {}", e.getMessage()); }
-		try { msg.removeField(803); } catch (Exception e) { log.trace("Remove 803 from body: {}", e.getMessage()); }
-		try { msg.removeField(583); } catch (Exception e) { log.trace("Remove 583 from body: {}", e.getMessage()); }
+		FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
 		// Remove 44 from each NoSides group (447 stays in NoPartyIDs — we set it in buildSidesGroup)
 		try {
 			int n = msg.getNoSides().getValue();
@@ -1840,58 +1970,12 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	 * Non-EN acks: TS → {@link FinraTsAckBodyReorder}; SP/CA → {@link FinraTraceAeAckBodyReorder} (SP trailing differs from CA).
 	 */
 	private void applyAePricingEchoAndFinraCaenOrder(TradeCaptureReport req, TradeCaptureReport res) {
-		GatewayAllocQtyEcho.stripRootLevelPricingTags(res);
-		try {
-			String suf = null;
-			String prefix = null;
-			if (res.isSetField(1011)) {
-				StringField sf1011 = new StringField(1011);
-				res.getField(sf1011);
-				String ev = sf1011.getValue();
-				if (ev != null && ev.length() >= 2) {
-					suf = ev.substring(ev.length() - 2);
-					prefix = ev.substring(0, 2);
-				}
-			}
-			if ("EN".equals(suf)) {
-				if ("SP".equals(prefix)) {
-					FinraSpAckBodyReorder.reorderSpenAcknowledgementBody(res);
-				} else if ("TS".equals(prefix)) {
-					FinraTsAckBodyReorder.reorderTsenAcknowledgementBody(res);
-				} else {
-					FinraCaenBodyReorder.reorderCaenAcknowledgementBody(res);
-				}
-			} else if ("TS".equals(prefix)) {
-				FinraTsAckBodyReorder.reorderFinraTsAckBody(res);
-			} else {
-				FinraTraceAeAckBodyReorder.reorderFinraAckBody(res);
-			}
-		} catch (Exception e) {
-			log.trace("applyAePricingEchoAndFinraCaenOrder: {}", e.getMessage());
-		}
+		prepareOutboundAeForWire(res);
 	}
 
-	/** After pricing strip on cancel/reversal/allege responses: Treasury §5.2.x vs SP/CA §5.1.x / §5.2.x. */
+	/** After pricing strip on cancel/reversal/allege responses: same wire layout as EN first send / 43=Y resend. */
 	private void reorderAckBodyAfterStrip(TradeCaptureReport msg) {
-		try {
-			if (!msg.isSetField(1011)) {
-				return;
-			}
-			StringField sf1011 = new StringField(1011);
-			msg.getField(sf1011);
-			String ev = sf1011.getValue();
-			if (ev == null || ev.length() < 2) {
-				return;
-			}
-			String prefix = ev.substring(0, 2);
-			if ("TS".equals(prefix)) {
-				FinraTsAckBodyReorder.reorderFinraTsAckBody(msg);
-			} else {
-				FinraTraceAeAckBodyReorder.reorderFinraAckBody(msg);
-			}
-		} catch (Exception e) {
-			log.trace("reorderAckBodyAfterStrip: {}", e.getMessage());
-		}
+		prepareOutboundAeForWire(msg);
 	}
 
 	/**
