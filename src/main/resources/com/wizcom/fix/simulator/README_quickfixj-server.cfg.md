@@ -93,8 +93,8 @@ This document describes **every** setting in `quickfixj-server.cfg`: what it doe
 | Field | Values | How it is used |
 |-------|--------|----------------|
 | **LogonRequired** | Y \| N | **WizFixApplication:** Y = send Logon back to initiator when they log on. N = do not send Logon (reject logon with RejectLogon); all app/admin messages are “picked” but no response sent. |
-| **LogonDelay** | Y \| N | **WizFixApplication:** Y = after receiving Logon, wait **LogonDelayinSecs** before sending our Logon. During delay **all messages are ignored**. N = send Logon immediately. |
-| **LogonDelayinSecs** | integer (e.g. 15) | **WizFixApplication:** Delay in seconds when LogonDelay=Y. Initiator’s logon response timeout should be greater than this. |
+| **LogonDelay** | Y \| N | **WizFixApplication:** Y = in **toAdmin** (outbound Logon), wait **LogonDelayinSecs** seconds before the Logon is sent on the wire; during wait **all messages are ignored**. N = send Logon immediately; **LogonDelayinSecs is ignored**. |
+| **LogonDelayinSecs** | integer (e.g. 15) | **WizFixApplication:** Active **only when LogonDelay=Y**; otherwise treated as 0. Initiator’s logon response timeout should be greater than this when delay is enabled. |
 
 ---
 
@@ -202,7 +202,7 @@ Each **[session]** block defines one session (e.g. SP, CA, TS). It inherits **[d
 | **SocketAcceptPort** | port (e.g. 45001) | **Simulator / QuickFIX/J:** Acceptor listen port for this session. |
 | **NonStopSession** | Y \| N | **QuickFIX/J:** Override for this session (allow logon 24/7). |
 | **HeartBeat_Required**, **HeartBtDelay**, **HeartBtDelayCount**, **HeartBtDelayTime** | Y/N, integers | **WizFixApplication:** Per-session override; omitted → **[default]**. |
-| **LogonRequired**, **LogonDelay**, **LogonDelayinSecs** | Y/N, integer | **WizFixApplication:** Per-session override; omitted → **[default]**. |
+| **LogonRequired**, **LogonDelay**, **LogonDelayinSecs** | Y/N, integer | **WizFixApplication:** Required in **[default]**; override per **[session]**. Example: `[default]` `LogonDelay=N`; CA session `LogonDelay=Y`, `LogonDelayinSecs=30`. `LogonDelayinSecs` applies only when that session has `LogonDelay=Y`. |
 | **ResponseMsgDelay**, **ResponseMsgDelayTime** | Y/N, integer | **WizFixApplication:** Per-session override; omitted → **[default]**. |
 | **SendLogout_at_Shutdown** | Y \| N | **Simulator:** Per-session override on shutdown; omitted → **[default]**. |
 | **SessionTimeoutRequired**, **SessionTimeoutSeconds**, **isLogoutRequiredatSessionTimeout** | True/False, integer | **WizFixApplication:** Wall-clock timeout for that session only. |

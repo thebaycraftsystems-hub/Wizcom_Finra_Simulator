@@ -16,6 +16,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.Timer;
@@ -94,6 +95,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 	/** Sessions waiting to send Logon back to initiator (LogonDelay); ignore all messages until we send Logon. */
 	private final Set<SessionID> pendingLogonResponseSessions = Collections.synchronizedSet(new HashSet<>());
+	/** Wall-clock time (ms) when outbound Logon may be sent on the wire; set on inbound Logon, enforced in toAdmin. */
+	private final ConcurrentMap<SessionID, Long> logonWireDelayUntilMs = new ConcurrentHashMap<>();
 	/** Sessions waiting to send Heartbeat to initiator (HeartBtDelay); app messages are queued and replayed after delay. */
 	private final Set<SessionID> pendingHeartbeatResponseSessions = Collections.synchronizedSet(new HashSet<>());
 	/** App messages (AE etc.) received during HeartBtDelay; replayed after delay completes. Key = SessionID, value = queue of raw FIX strings. */
@@ -143,42 +146,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		this.sessionSequenceFromDB = sessionSequenceFromDB;
 	}
 
-	/**
-	 * Returns the session's next sender sequence from the engine after refresh (e.g. after Logon refresh from JdbcStore).
-	 * QuickFIX/J 2.3+ exposes {@link Session#getNextSenderMsgSeqNum()}; 2.1.x does not — use {@link MessageStore#getNextSenderMsgSeqNum()}.
-	 */
 	private static int getNextSenderMsgSeqNumFromSession(Session session) {
-		if (session == null) {
-			return -1;
-		}
-		java.lang.reflect.Method m = null;
-		try {
-			m = Session.class.getMethod("getNextSenderMsgSeqNum");
-		} catch (NoSuchMethodException e) {
-			// QFJ 2.1.x: use MessageStore below
-		}
-		if (m != null) {
-			try {
-				Object v = m.invoke(session);
-				if (v != null) {
-					int n = ((Number) v).intValue();
-					if (n >= 1) {
-						return n;
-					}
-				}
-			} catch (Exception e) {
-				log.trace("getNextSenderMsgSeqNum on Session: {}", e.toString());
-			}
-		}
-		try {
-			MessageStore store = session.getStore();
-			if (store != null) {
-				return store.getNextSenderMsgSeqNum();
-			}
-		} catch (IOException e) {
-			log.debug("getNextSenderMsgSeqNum from MessageStore: {}", e.getMessage());
-		}
-		return -1;
+		return SessionSequenceUtil.getNextSenderMsgSeqNum(session);
 	}
 
 	/** Common FIX tag numbers to human-readable names (for incoming message log). */
@@ -338,15 +307,29 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		if (!logonRejectRequiredConfiguredSessions.isEmpty()) {
 			log.info("LogOnRejectRequired=Y for {} session(s): {}", logonRejectRequiredConfiguredSessions.size(), logonRejectRequiredConfiguredSessions);
 		}
+		if (settings != null) {
+			Iterator<SessionID> cfgIt = settings.sectionIterator();
+			while (cfgIt.hasNext()) {
+				SessionID cfgSid = cfgIt.next();
+				log.info("Session config {}: effective LogonDelay={}, LogonDelayinSecs={}",
+						cfgSid, logonDelayEffective(cfgSid), logonDelaySecsEffective(cfgSid));
+			}
+		}
 		if (sessionTimeoutRequiredFromConfig && sessionTimeoutSecondsFromConfig <= 0) {
 			log.warn("SessionTimeoutRequired=True but SessionTimeoutSeconds is missing or <= 0 — wall-clock session timeout disabled.");
 		}
-		log.info("Config at startup ({}): LogonRequired={}, LogonDelay={}, LogonDelayinSecs={}, HeartBeat_Required={}, HeartBtDelay={}, HeartBtDelayTime={}, ResponseMsgDelay={}, ResponseMsgDelayTime={}, SessionTimeoutRequired={}, SessionTimeoutSeconds={}, isLogoutRequiredatSessionTimeout={}",
-			simulatorRoleFromConfig, logonRequiredFromConfig, logonDelayFromConfig, logonDelaySecsFromConfig,
+		if (!logonDelayFromConfig && logonDelaySecsFromConfig > 0) {
+			log.info("LogonDelay=N: LogonDelayinSecs={} is ignored (delay applies only when LogonDelay=Y).", logonDelaySecsFromConfig);
+		}
+		log.info("Config at startup ({}): LogonRequired={}, LogonDelay={}, LogonDelayinSecs={}{}, HeartBeat_Required={}, HeartBtDelay={}, HeartBtDelayTime={}, ResponseMsgDelay={}, ResponseMsgDelayTime={}, SessionTimeoutRequired={}, SessionTimeoutSeconds={}, isLogoutRequiredatSessionTimeout={}",
+			simulatorRoleFromConfig, logonRequiredFromConfig, logonDelayFromConfig,
+			logonDelayFromConfig ? logonDelaySecsFromConfig : 0,
+			logonDelayFromConfig ? "" : " (inactive, LogonDelay=N)",
 			heartBeatRequiredFromConfig, heartBtDelayFromConfig, heartBtDelayTimeFromConfig,
 			responseMsgDelayFromConfig, responseMsgDelayTimeFromConfig,
 			sessionTimeoutRequiredFromConfig, sessionTimeoutSecondsFromConfig, isLogoutRequiredAtSessionTimeoutFromConfig);
-		String logonSecsLine = simulatorRoleFromConfig + " LogonDelayinSecs from config = " + logonDelaySecsFromConfig;
+		String logonSecsLine = simulatorRoleFromConfig + " LogonDelayinSecs from config = "
+				+ (logonDelayFromConfig ? String.valueOf(logonDelaySecsFromConfig) : logonDelaySecsFromConfig + " (ignored, LogonDelay=N)");
 		log.info(logonSecsLine);
 		System.out.println(logonSecsLine);
 		if (configResourceName != null) {
@@ -403,14 +386,32 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		this.compliancePipeline = new CompliancePipeline();
 	}
 	
-	public void onCreate(SessionID arg0) {	}
+	public void onCreate(SessionID arg0) {
+		clearLogonDelayState(arg0);
+		pendingHeartbeatResponseSessions.remove(arg0);
+	}
 
 	public void onLogon(SessionID arg0) {
+		clearLogonDelayState(arg0);
 		scheduleSessionWallClockTimeout(arg0);
 	}
 
 	public void onLogout(SessionID arg0) {
 		cancelSessionWallClockTimeout(arg0);
+		clearLogonDelayState(arg0);
+		pendingHeartbeatResponseSessions.remove(arg0);
+		heartbeatDelayAppMessageQueue.remove(arg0);
+	}
+
+	/** Clear LogonDelay pending state for this session (handles SessionID field-order mismatches). */
+	private void clearLogonDelayState(SessionID sid) {
+		if (sid == null) {
+			return;
+		}
+		pendingLogonResponseSessions.remove(sid);
+		logonWireDelayUntilMs.remove(sid);
+		pendingLogonResponseSessions.removeIf(k -> sessionIdsFixEquivalent(k, sid));
+		logonWireDelayUntilMs.keySet().removeIf(k -> sessionIdsFixEquivalent(k, sid));
 	}
 
 	/**
@@ -484,9 +485,19 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			throw new RejectLogon(reason, !rejectOnWire, -1);
 		}
 
-		if (pendingLogonResponseSessions.contains(arg1) || pendingHeartbeatResponseSessions.contains(arg1)) {
-			log.info("Ignoring admin message until we send Logon/Heartbeat back to initiator: [ {} ]", arg0.toString());
+		if (pendingHeartbeatResponseSessions.contains(arg1) && !"A".equals(msgType)) {
+			log.info("Ignoring admin message until we send Heartbeat back to initiator: [ {} ]", arg0.toString());
 			return;
+		}
+		if (pendingLogonResponseSessions.contains(arg1)) {
+			if ("A".equals(msgType)) {
+				log.warn("Inbound Logon while LogonDelay still pending for {} — gateway retry/reconnect; clearing pending and processing this Logon",
+						arg1);
+				pendingLogonResponseSessions.remove(arg1);
+			} else {
+				log.info("Ignoring admin message until we send Logon back to initiator: [ {} ]", arg0.toString());
+				return;
+			}
 		}
 		if (!logonRequiredEffective(arg1)) {
 			log.info("Picked message from initiator: [ {} ]. Since we configured LogonRequired=N, not sending any response to initiator.", arg0.toString());
@@ -498,19 +509,22 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			return;
 		}
 		if ("A".equals(msgType)) {
+			boolean delayOn = logonDelayEffective(arg1);
 			int logonDelaySecs = logonDelaySecsEffective(arg1);
-			if (logonDelayEffective(arg1) && logonDelaySecs > 0) {
-				log.info("LogonDelay=Y, LogonDelayinSecs={} ({} — session or [default] config)", logonDelaySecs, simulatorRoleFromConfig);
-					pendingLogonResponseSessions.add(arg1);
-					log.warn("LogonDelay=Y: waiting {}s before accepting logon. Ignoring all messages until we send Logon back. Ensure the initiator's logon response timeout is greater than {}s.", logonDelaySecs, logonDelaySecs);
-					try {
-						Thread.sleep(logonDelaySecs * 1000L);
-					} catch (InterruptedException e) {
-						Thread.currentThread().interrupt();
-						pendingLogonResponseSessions.remove(arg1);
-						log.warn("Logon delay interrupted");
-					}
-					log.info("LogonDelay: {}s elapsed, accepting logon and sending Logon to initiator for session {}", logonDelaySecs, arg1);
+			if (delayOn) {
+				log.info("Logon for {}: LogonDelay=Y, LogonDelayinSecs={} (active)", arg1, logonDelaySecs);
+			} else {
+				log.info("Logon for {}: LogonDelay=N — LogonDelayinSecs ignored (immediate Logon)", arg1);
+			}
+			if (logonDelayFromConfig && !delayOn) {
+				log.warn("LogonDelay=Y in [default] but effective LogonDelay=N for {} — [session] has LogonDelay=N; remove it on [session] to use [default], or set LogonDelay=Y on that session.", arg1);
+			}
+			if (delayOn && logonDelaySecs > 0) {
+				pendingLogonResponseSessions.add(arg1);
+				long untilMs = System.currentTimeMillis() + logonDelaySecs * 1000L;
+				logonWireDelayUntilMs.put(arg1, untilMs);
+				log.warn("LogonDelay=Y: {}s delay scheduled for {} (outbound Logon held in toAdmin until {}); gateway LogonTimeout must be > {}s (recommend >= {}s)",
+						logonDelaySecs, arg1, untilMs, logonDelaySecs, logonDelaySecs + 10);
 			}
 			// On receiving Logon: align sequence so engine sends correct 789 and we accept initiator's next message.
 			// QuickFIX/J engine sends 789 = getNextTargetMsgSeqNum() + 1, then increments store. So we set store to
@@ -525,6 +539,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				// Set next expected to the Logon's MsgSeqNum so engine sends 789 = logonMsgSeqNum+1 (never 0)
 				int storeNextTarget = Math.max(1, logonMsgSeqNum);
 				int nextSender = -1;
+				int initiatorExpectedFromUs = -1;
+				boolean initiatorBehindAligned = false;
 				SessionSequenceFromDB.SessionSequence dbSeq = null;
 
 				// 1) Load shared TRACE_FIX_SESSIONS first (Primary/Secondary failover). Previously we applied initiator 789
@@ -540,16 +556,16 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 					}
 				}
 
-				// 2) Initiator may send 789 on Logon = next seq they expect from us; merge up, never down vs DB
+				// 2) Initiator may send 789 on Logon = next seq they expect from us (merge up for failover; cap down below)
 				try {
-					int initiatorExpectedFromUs = arg0.getField(new NextExpectedMsgSeqNum()).getValue();
+					initiatorExpectedFromUs = arg0.getField(new NextExpectedMsgSeqNum()).getValue();
 					int hint = Math.max(1, initiatorExpectedFromUs);
 					if (nextSender < 1) {
 						nextSender = hint;
 					} else {
 						nextSender = Math.max(nextSender, hint);
 					}
-					log.info("Logon(789={}): merged next sender (with DB if any) = {}", initiatorExpectedFromUs, nextSender);
+					log.info("Logon(789={}): next sender after DB/789 merge = {}", initiatorExpectedFromUs, nextSender);
 				} catch (FieldNotFound e) {
 					// optional on Logon
 				}
@@ -558,6 +574,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 					// Initiator is behind (e.g. reconnected with lower seq): align so we don't exceed their position
 					if ((logonMsgSeqNum + 1) < nextSender) {
 						nextSender = Math.max(1, logonMsgSeqNum + 1);
+						initiatorBehindAligned = true;
 						log.info("Logon(34={}): initiator behind; aligning next sender to {} so first message to initiator is not higher (avoid 'expecting N but received 154').",
 								logonMsgSeqNum, nextSender);
 					}
@@ -578,12 +595,16 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 					nextSender = 1;
 					log.info("Logon: fresh day (no session row in DB for current date); first message to initiator will be 34=1.");
 				}
-				// 3) Merge engine next sender (local file store often 1 on Secondary); take max so DB/shared state wins at failover
+				// 3) Merge engine next sender; ignore stale in-memory/Jdbc refresh one step above Logon(34) on restart
 				int fromEngine = getNextSenderMsgSeqNumFromSession(session);
 				if (fromEngine >= 1) {
 					int merged = Math.max(nextSender, fromEngine);
+					if (!initiatorBehindAligned && merged > logonMsgSeqNum + 1) {
+						log.debug("Logon: ignoring engine next sender {} > Logon(34={})+1 (stale after restart).", merged, logonMsgSeqNum);
+						merged = Math.max(nextSender, logonMsgSeqNum + 1);
+					}
 					if (merged != nextSender) {
-						log.debug("Logon: raised next sender from {} to {} (engine had higher; e.g. same-JVM reconnect).", nextSender, merged);
+						log.debug("Logon: raised next sender from {} to {} (engine merge).", nextSender, merged);
 					}
 					nextSender = merged;
 				}
@@ -592,6 +613,16 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				if (lastExpected != null && lastExpected > nextSender) {
 					log.info("Logon: using last expected-from-us {} (from previous Logout 58) instead of {} so initiator does not reject.", lastExpected, nextSender);
 					nextSender = lastExpected;
+				}
+				// Stale DB/engine one high after shutdown: reply Logon(34=M) not M+1 when initiator sent Logon(M)
+				if (initiatorExpectedFromUs >= 1 && nextSender > initiatorExpectedFromUs) {
+					log.info("Logon(789={}): aligning next sender from {} to {} (avoid skipped outbound seq).",
+							initiatorExpectedFromUs, nextSender, initiatorExpectedFromUs);
+					nextSender = initiatorExpectedFromUs;
+				} else if (!initiatorBehindAligned && nextSender > logonMsgSeqNum) {
+					log.info("Logon(34={}): aligning next sender from {} to {} (initiator Logon seq is our next outbound after reconnect).",
+							logonMsgSeqNum, nextSender, logonMsgSeqNum);
+					nextSender = logonMsgSeqNum;
 				}
 
 				session.setNextTargetMsgSeqNum(storeNextTarget);
@@ -665,17 +696,18 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			} catch (Exception e) {
 				log.debug("Could not parse Logout 58 for auto-fix: {}", e.getMessage());
 			}
-			// When initiator sends Logout (any), persist next sender = current+1 so next Logon uses 34=(N+1) even with SendLogout_at_Shutdown=N
+			// When initiator sends Logout (any), persist engine next sender (JdbcStore outgoing_seqnum = next to assign, not last+1)
 			if (!didExpectingFix && sessionSequenceFromDB != null) {
 				Session session = Session.lookupSession(arg1);
 				int nextToPersist = -1;
 				if (session != null) {
-					int cur = getNextSenderMsgSeqNumFromSession(session);
-					if (cur >= 1) nextToPersist = cur + 1;
+					nextToPersist = getNextSenderMsgSeqNumFromSession(session);
 				}
 				if (nextToPersist < 1) {
 					SessionSequenceFromDB.SessionSequence dbSeq = sessionSequenceFromDB.getSessionSequence(arg1);
-					if (dbSeq != null) nextToPersist = dbSeq.outgoingSeqNum + 1;
+					if (dbSeq != null) {
+						nextToPersist = dbSeq.outgoingSeqNum;
+					}
 				}
 				if (nextToPersist >= 1) {
 					sessionSequenceFromDB.updateOutgoingSeqNum(arg1, nextToPersist);
@@ -689,11 +721,13 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		try {
 			String msgType = arg0.getHeader().getField(new MsgType()).getValue();
 			if ("A".equals(msgType)) {
-				pendingLogonResponseSessions.remove(arg1);
 				if (!logonRequiredEffective(arg1)) {
+					clearLogonDelayState(arg1);
 					log.info("LogonRequired=N: not sending any response (Logon) to initiator for session {}", arg1);
 					throwDoNotSend();
 				}
+				waitForLogonWireDelay(arg1);
+				clearLogonDelayState(arg1);
 			}
 			if ("0".equals(msgType)) {
 				pendingHeartbeatResponseSessions.remove(arg1);
@@ -758,13 +792,33 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	}
 
 	private boolean getBoolSetting(SessionID sessionID, String key, boolean defaultValue) {
-		try {
-			if (sessionID != null && settings.isSetting(sessionID, key))
-				return settings.getBool(sessionID, key);
-			return settings.getBool(key);
-		} catch (Exception ignored) {
+		if (settings == null) {
 			return defaultValue;
 		}
+		try {
+			if (sessionID != null) {
+				if (settings.isSetting(sessionID, key)) {
+					return settings.getBool(sessionID, key);
+				}
+				SessionID swapped = swapSessionSenderTarget(sessionID);
+				if (settings.isSetting(swapped, key)) {
+					return settings.getBool(swapped, key);
+				}
+				Iterator<SessionID> it = settings.sectionIterator();
+				while (it.hasNext()) {
+					SessionID cfg = it.next();
+					if (sessionIdsFixEquivalent(cfg, sessionID) && settings.isSetting(cfg, key)) {
+						return settings.getBool(cfg, key);
+					}
+				}
+			}
+			if (settings.isSetting(key)) {
+				return settings.getBool(key);
+			}
+		} catch (Exception ignored) {
+			// fall through
+		}
+		return defaultValue;
 	}
 
 	/**
@@ -855,13 +909,33 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	}
 
 	private int getIntSetting(SessionID sessionID, String key, int defaultValue) {
-		try {
-			if (sessionID != null && settings.isSetting(sessionID, key))
-				return (int) settings.getLong(sessionID, key);
-			return (int) settings.getLong(key);
-		} catch (Exception ignored) {
+		if (settings == null) {
 			return defaultValue;
 		}
+		try {
+			if (sessionID != null) {
+				if (settings.isSetting(sessionID, key)) {
+					return (int) settings.getLong(sessionID, key);
+				}
+				SessionID swapped = swapSessionSenderTarget(sessionID);
+				if (settings.isSetting(swapped, key)) {
+					return (int) settings.getLong(swapped, key);
+				}
+				Iterator<SessionID> it = settings.sectionIterator();
+				while (it.hasNext()) {
+					SessionID cfg = it.next();
+					if (sessionIdsFixEquivalent(cfg, sessionID) && settings.isSetting(cfg, key)) {
+						return (int) settings.getLong(cfg, key);
+					}
+				}
+			}
+			if (settings.isSetting(key)) {
+				return (int) settings.getLong(key);
+			}
+		} catch (Exception ignored) {
+			// fall through
+		}
+		return defaultValue;
 	}
 
 	private boolean logonRequiredEffective(SessionID sid) {
@@ -872,8 +946,48 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		return getBoolSetting(sid, "LogonDelay", logonDelayFromConfig);
 	}
 
+	/**
+	 * Blocks in toAdmin until LogonDelayinSecs has elapsed since inbound Logon (wire send point).
+	 * QuickFIX/J always calls toAdmin for outbound Logon before transmit; DoNotSend does not work for admin messages.
+	 */
+	private void waitForLogonWireDelay(SessionID sid) {
+		Long untilMs = null;
+		if (sid != null) {
+			untilMs = logonWireDelayUntilMs.remove(sid);
+			if (untilMs == null) {
+				for (Map.Entry<SessionID, Long> e : logonWireDelayUntilMs.entrySet()) {
+					if (sessionIdsFixEquivalent(e.getKey(), sid)) {
+						untilMs = logonWireDelayUntilMs.remove(e.getKey());
+						break;
+					}
+				}
+			}
+		}
+		if (untilMs == null) {
+			return;
+		}
+		long waitMs = untilMs - System.currentTimeMillis();
+		if (waitMs <= 0) {
+			log.info("LogonDelay: delay already elapsed for {} — sending Logon on wire now", sid);
+			return;
+		}
+		log.warn("LogonDelay=Y: waiting {}ms in toAdmin before sending Logon on wire for {}", waitMs, sid);
+		long start = System.currentTimeMillis();
+		try {
+			Thread.sleep(waitMs);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			log.warn("LogonDelay: wait interrupted for {} after {}ms — sending Logon on wire now", sid, System.currentTimeMillis() - start);
+		}
+		log.info("LogonDelay: waited {}ms — sending Logon on wire for {}", System.currentTimeMillis() - start, sid);
+	}
+
+	/** Seconds to wait before Logon response; 0 when LogonDelay=N (LogonDelayinSecs is not used). */
 	private int logonDelaySecsEffective(SessionID sid) {
-		return getIntSetting(sid, "LogonDelayinSecs", logonDelaySecsFromConfig);
+		if (!logonDelayEffective(sid)) {
+			return 0;
+		}
+		return Math.max(0, getIntSetting(sid, "LogonDelayinSecs", logonDelaySecsFromConfig));
 	}
 
 	private boolean heartBeatRequiredEffective(SessionID sid) {

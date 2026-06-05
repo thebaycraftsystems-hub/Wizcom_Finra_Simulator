@@ -94,8 +94,8 @@ Then restart the simulator (or leave it running; RefreshOnLogon loads on next Lo
 
 **Fix (simulator):** When **UseJdbcStore=Y**:
 
-- **SendLogout_at_Shutdown=Y:** After sending each Logout, the simulator writes next sender (current from DB + 1) to `TRACE_FIX_SESSIONS.outgoing_seqnum` so after restart the next Logon uses 34=(N+1). See `Simulator.sendLogoutToAllSessions()`.
-- **SendLogout_at_Shutdown=N:** (1) When we **receive** Logout from the initiator, we persist next sender = engine’s current + 1 so the next Logon uses 34=(N+1). (2) On **Logon**, we use the **max** of (DB value, engine’s current next sender) so we never send a lower seq when the initiator reconnects without us having sent Logout (same process, session still in memory). See `WizFixApplication.fromAdmin` (Logout 35=5 and Logon 35=A).
+- **SendLogout_at_Shutdown=Y:** After sending each Logout at N, the simulator persists **N+1** from the Logout message header (`SessionSequenceUtil.nextOutgoingSeqAfterSent`) to `TRACE_FIX_SESSIONS.outgoing_seqnum` — **not** `DB outgoing_seqnum + 1` and not a stale `getNextSenderMsgSeqNum()` after send (JdbcStore can already be one high). On Logon, if DB/engine is still one high, align next sender down to the initiator’s Logon `34` (e.g. Logout 6 → Logon 7, not 8).
+- **SendLogout_at_Shutdown=N:** (1) When we **receive** Logout from the initiator, we persist the engine’s next sender seq (same semantics). (2) On **Logon**, we merge DB/engine and **cap down** to initiator **789** when DB is one high. See `WizFixApplication.fromAdmin` (Logout 35=5 and Logon 35=A).
 
 ### 4. When the initiator sends a sequence reset (ResetSeqNumFlag 141=Y)
 

@@ -43,7 +43,7 @@ import quickfix.ScreenLogFactory;
 import quickfix.Session;
 import quickfix.SessionID;
 import quickfix.SessionSettings;
-import quickfix.SocketAcceptor;
+import quickfix.ThreadedSocketAcceptor;
 import quickfix.field.Text;
 import quickfix.fix44.Logout;
 import quickfix.mina.acceptor.DynamicAcceptorSessionProvider;
@@ -59,7 +59,7 @@ import static quickfix.Acceptor.SETTING_SOCKET_ACCEPT_PORT;
  */
 public class Simulator {
 	private final static Logger log = LoggerFactory.getLogger(Simulator.class);
-	private final SocketAcceptor acceptor;
+	private final ThreadedSocketAcceptor acceptor;
 	private final Map<InetSocketAddress, List<TemplateMapping>> dynamicSessionMappings = new HashMap<>();
 	/** HikariCP DataSource when DB is used; held for clean shutdown. */
 	private final HikariDataSource jdbcDataSource;
@@ -171,7 +171,9 @@ public class Simulator {
         
         MessageFactory messageFactory = new DefaultMessageFactory();
 
-        acceptor = new SocketAcceptor(wizFixApplication, messageStoreFactory, settings, logFactory, messageFactory);
+        // ThreadedSocketAcceptor: per-session message threads so LogonDelay on TS/CA does not block SP (SingleThreadedEventHandlingStrategy queues all sessions).
+        acceptor = new ThreadedSocketAcceptor(wizFixApplication, messageStoreFactory, settings, logFactory, messageFactory);
+        log.info("Using ThreadedSocketAcceptor — LogonDelay on one session does not block other sessions.");
 
         configureDynamicSessions(settings, wizFixApplication, messageStoreFactory, logFactory, messageFactory);
 
@@ -398,22 +400,19 @@ public class Simulator {
                 try {
                     Session session = Session.lookupSession(sessionID);
                     if (session != null && session.isLoggedOn()) {
-                        // Before send: read current next sender seq so we can persist (current+1) after send (engine may not flush before process exit)
-                        int nextSeqToPersist = -1;
-                        if (sessionSequenceFromDB != null) {
-                            SessionSequenceFromDB.SessionSequence dbSeq = sessionSequenceFromDB.getSessionSequence(sessionID);
-                            if (dbSeq != null) {
-                                nextSeqToPersist = dbSeq.outgoingSeqNum + 1;
-                            }
-                        }
                         Logout logout = new Logout();
                         logout.setField(new Text("Simulator shutting down"));
                         Session.sendToTarget(logout, sessionID);
                         sent++;
                         log.info("SendLogout_at_Shutdown=Y: sent Logout to initiator for session {}", sessionID);
-                        if (sessionSequenceFromDB != null && nextSeqToPersist >= 1) {
-                            sessionSequenceFromDB.updateOutgoingSeqNum(sessionID, nextSeqToPersist);
-                            log.debug("SendLogout_at_Shutdown: persisted next sender seq {} for {} so next Logon uses 34={}.", nextSeqToPersist, sessionID, nextSeqToPersist);
+                        // Persist N+1 from Logout header (JdbcStore may already read one higher than engine.getNextSenderMsgSeqNum).
+                        if (sessionSequenceFromDB != null) {
+                            int nextSeqToPersist = SessionSequenceUtil.nextOutgoingSeqAfterSent(logout, session);
+                            if (nextSeqToPersist >= 1) {
+                                sessionSequenceFromDB.updateOutgoingSeqNum(sessionID, nextSeqToPersist);
+                                log.info("SendLogout_at_Shutdown: persisted next sender seq {} for {} so next Logon uses 34={}.",
+                                        nextSeqToPersist, sessionID, nextSeqToPersist);
+                            }
                         }
                     }
                 } catch (Exception e) {
