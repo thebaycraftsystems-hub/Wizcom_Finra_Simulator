@@ -57,4 +57,9 @@ public class LifecycleEngine {
     public void markAccepted(String tradeReportId, SessionID sessionID) {
         store.put(tradeReportId, sessionID, LifecycleState.ACCEPTED);
     }
+
+    /** Call when simulator sends SPMA/CAMA/TSMA (Match Status matched). */
+    public void markMatched(String tradeReportId, SessionID sessionID) {
+        store.put(tradeReportId, sessionID, LifecycleState.MATCHED);
+    }
 }

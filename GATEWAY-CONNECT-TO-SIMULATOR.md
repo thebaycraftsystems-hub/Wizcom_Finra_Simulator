@@ -102,7 +102,7 @@ The simulator can run as **Primary** or **Secondary (Backup)**. Both use the **s
 
 | Role       | Config file                        | Ports (SP / CA / TS)   | How to start |
 |------------|------------------------------------|-------------------------|--------------|
-| **Primary**   | quickfixj-server.cfg              | **64034**, **64093**, **64094** | `java -jar fix-simulator.jar` or `java -jar fix-simulator.jar quickfixj-server.cfg` |
+| **Primary**   |             | **64034**, **64093**, **64094** | `java -jar fix-simulator.jar` or `java -jar fix-simulator.jar quickfixj-server.cfg` |
 | **Secondary** | quickfixj-server-secondary.cfg     | **64134**, **64193**, **64194** | `java -jar fix-simulator.jar secondary` |
 
 - **Sequence numbers**: Primary and Secondary share the same JDBC store (same `TRACE_FIX_SESSIONS`, `TRACE_FIX_MESSAGES`). When the gateway fails over from Primary to Secondary, the session continues with the **same sequence numbers** (no reset).

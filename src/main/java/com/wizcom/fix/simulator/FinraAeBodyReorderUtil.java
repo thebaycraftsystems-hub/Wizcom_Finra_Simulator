@@ -142,11 +142,62 @@ public final class FinraAeBodyReorderUtil {
 	}
 
 	public static void clearNoSides(TradeCaptureReport msg) {
+		if (msg == null) {
+			return;
+		}
+		try {
+			for (int attempt = 0; attempt < 32; attempt++) {
+				int n;
+				try {
+					n = msg.getNoSides().getValue();
+				} catch (FieldNotFound e) {
+					break;
+				}
+				if (n < 1) {
+					break;
+				}
+				TradeCaptureReport.NoSides g = new TradeCaptureReport.NoSides();
+				msg.getGroup(1, g);
+				msg.removeGroup(g);
+			}
+		} catch (Exception e) {
+			log.trace("clearNoSides groups: {}", e.getMessage());
+		}
 		try {
 			msg.removeField(552);
 		} catch (Exception e) {
 			log.trace("clearNoSides: {}", e.getMessage());
 		}
+	}
+
+	/**
+	 * Copy populated {@code NoSides} groups before reorder. For MA, keep at most two groups that have Side (54).
+	 */
+	public static java.util.List<TradeCaptureReport.NoSides> snapshotNoSidesGroups(TradeCaptureReport msg,
+			int maxGroups) {
+		java.util.List<TradeCaptureReport.NoSides> sides = new java.util.ArrayList<>();
+		try {
+			int n = msg.getNoSides().getValue();
+			for (int i = 1; i <= n; i++) {
+				if (maxGroups > 0 && sides.size() >= maxGroups) {
+					break;
+				}
+				TradeCaptureReport.NoSides g = new TradeCaptureReport.NoSides();
+				msg.getGroup(i, g);
+				if (maxGroups > 0) {
+					try {
+						if (!g.isSetField(new Side())) {
+							continue;
+						}
+					} catch (Exception ignored) {
+						continue;
+					}
+				}
+				sides.add(g);
+			}
+		} catch (FieldNotFound ignored) {
+		}
+		return sides;
 	}
 
 	/**
@@ -170,7 +221,13 @@ public final class FinraAeBodyReorderUtil {
 			}
 			String suffix = ev.substring(ev.length() - 2);
 			String prefix = ev.length() >= 2 ? ev.substring(0, 2) : "";
-			if ("EN".equals(suffix) || "CR".equals(suffix)) {
+			if ("MA".equals(suffix)) {
+				if ("TS".equals(prefix)) {
+					FinraTsAckBodyReorder.reorderFinraTsAckBody(msg);
+				} else {
+					FinraMaBodyReorder.reorderMaBody(msg);
+				}
+			} else if ("EN".equals(suffix) || "CR".equals(suffix)) {
 				if ("SP".equals(prefix)) {
 					FinraSpAckBodyReorder.reorderSpenAcknowledgementBody(msg);
 				} else if ("TS".equals(prefix)) {

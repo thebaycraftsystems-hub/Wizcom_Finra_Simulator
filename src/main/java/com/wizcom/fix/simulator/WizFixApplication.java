@@ -121,6 +121,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	private final int traceNotAvailableIntervelFromConfig;
 	private final boolean responseMsgDelayFromConfig;
 	private final int responseMsgDelayTimeFromConfig;
+	private final boolean sendMatchStatusAckFromConfig;
+	private final int matchStatusAckDelaySecsFromConfig;
+
+	private final MatchStatusContextStore matchStatusContextStore = new MatchStatusContextStore();
 
 	/** Wall-clock session timeout: after successful Logon, optional timer per SessionID (ignores traffic). Parsed with Boolean.parseBoolean (True/False). */
 	private final boolean sessionTimeoutRequiredFromConfig;
@@ -269,6 +273,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		this.traceNotAvailableIntervelFromConfig = 120;
 		this.responseMsgDelayFromConfig = false;
 		this.responseMsgDelayTimeFromConfig = 0;
+		this.sendMatchStatusAckFromConfig = true;
+		this.matchStatusAckDelaySecsFromConfig = 0;
 		this.sessionTimeoutRequiredFromConfig = false;
 		this.sessionTimeoutSecondsFromConfig = 0;
 		this.isLogoutRequiredAtSessionTimeoutFromConfig = true;
@@ -300,6 +306,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		this.traceNotAvailableIntervelFromConfig = requireIntFromDefault(settings, "TraceNotAvailableIntervel");
 		this.responseMsgDelayFromConfig = requireBoolFromDefault(settings, "ResponseMsgDelay");
 		this.responseMsgDelayTimeFromConfig = requireIntFromDefault(settings, "ResponseMsgDelayTime");
+		this.sendMatchStatusAckFromConfig = readSendMatchStatusAck(settings);
+		this.matchStatusAckDelaySecsFromConfig = readMatchStatusAckDelaySecs(settings);
 		this.sessionTimeoutRequiredFromConfig = readSessionTimeoutRequired(settings);
 		this.sessionTimeoutSecondsFromConfig = readSessionTimeoutSeconds(settings);
 		this.isLogoutRequiredAtSessionTimeoutFromConfig = readIsLogoutRequiredAtSessionTimeout(settings);
@@ -321,12 +329,13 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		if (!logonDelayFromConfig && logonDelaySecsFromConfig > 0) {
 			log.info("LogonDelay=N: LogonDelayinSecs={} is ignored (delay applies only when LogonDelay=Y).", logonDelaySecsFromConfig);
 		}
-		log.info("Config at startup ({}): LogonRequired={}, LogonDelay={}, LogonDelayinSecs={}{}, HeartBeat_Required={}, HeartBtDelay={}, HeartBtDelayTime={}, ResponseMsgDelay={}, ResponseMsgDelayTime={}, SessionTimeoutRequired={}, SessionTimeoutSeconds={}, isLogoutRequiredatSessionTimeout={}",
+		log.info("Config at startup ({}): LogonRequired={}, LogonDelay={}, LogonDelayinSecs={}{}, HeartBeat_Required={}, HeartBtDelay={}, HeartBtDelayTime={}, ResponseMsgDelay={}, ResponseMsgDelayTime={}, SendMatchStatusAck={}, MatchStatusAckDelaySecs={}, SessionTimeoutRequired={}, SessionTimeoutSeconds={}, isLogoutRequiredatSessionTimeout={}",
 			simulatorRoleFromConfig, logonRequiredFromConfig, logonDelayFromConfig,
 			logonDelayFromConfig ? logonDelaySecsFromConfig : 0,
 			logonDelayFromConfig ? "" : " (inactive, LogonDelay=N)",
 			heartBeatRequiredFromConfig, heartBtDelayFromConfig, heartBtDelayTimeFromConfig,
 			responseMsgDelayFromConfig, responseMsgDelayTimeFromConfig,
+			sendMatchStatusAckFromConfig, matchStatusAckDelaySecsFromConfig,
 			sessionTimeoutRequiredFromConfig, sessionTimeoutSecondsFromConfig, isLogoutRequiredAtSessionTimeoutFromConfig);
 		String logonSecsLine = simulatorRoleFromConfig + " LogonDelayinSecs from config = "
 				+ (logonDelayFromConfig ? String.valueOf(logonDelaySecsFromConfig) : logonDelaySecsFromConfig + " (ignored, LogonDelay=N)");
@@ -379,6 +388,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		this.traceNotAvailableIntervelFromConfig = 120;
 		this.responseMsgDelayFromConfig = false;
 		this.responseMsgDelayTimeFromConfig = 0;
+		this.sendMatchStatusAckFromConfig = true;
+		this.matchStatusAckDelaySecsFromConfig = 0;
 		this.sessionTimeoutRequiredFromConfig = false;
 		this.sessionTimeoutSecondsFromConfig = 0;
 		this.isLogoutRequiredAtSessionTimeoutFromConfig = true;
@@ -1014,6 +1025,36 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		return getIntSetting(sid, "ResponseMsgDelayTime", responseMsgDelayTimeFromConfig);
 	}
 
+	private static boolean readSendMatchStatusAck(SessionSettings s) {
+		try {
+			if (s == null || !s.isSetting("SendMatchStatusAck")) {
+				return true;
+			}
+			return s.getBool("SendMatchStatusAck");
+		} catch (Exception e) {
+			return true;
+		}
+	}
+
+	private static int readMatchStatusAckDelaySecs(SessionSettings s) {
+		try {
+			if (s == null || !s.isSetting("MatchStatusAckDelaySecs")) {
+				return 0;
+			}
+			return Math.max(0, Integer.parseInt(s.getString("MatchStatusAckDelaySecs").trim()));
+		} catch (Exception e) {
+			return 0;
+		}
+	}
+
+	private boolean sendMatchStatusAckEffective(SessionID sid) {
+		return getBoolSetting(sid, "SendMatchStatusAck", sendMatchStatusAckFromConfig);
+	}
+
+	private int matchStatusAckDelaySecsEffective(SessionID sid) {
+		return Math.max(0, getIntSetting(sid, "MatchStatusAckDelaySecs", matchStatusAckDelaySecsFromConfig));
+	}
+
 	/** Require key in config; throw ConfigError if missing. No defaults. */
 	private static String requireStringFromDefault(SessionSettings s, String key) throws ConfigError {
 		if (s == null || !s.isSetting(key))
@@ -1480,6 +1521,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				ensureCXHasOneSideWithStructure(msg);
 				return;
 			}
+			if ("MA".equals(suffix)) {
+				ensureMAHasTwoSidesWithStructure(msg, msg);
+				return;
+			}
 		}
 		ensureResponseHasSides(msg);
 	}
@@ -1502,7 +1547,45 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			FinraAeBodyReorderUtil.reorderOutboundAeBody(msg);
 			FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
 		}
-		FinraAeBodyReorderUtil.syncNoSidesCountToPopulatedGroups(msg);
+		boolean isMa = false;
+		try {
+			if (msg.isSetField(1011)) {
+				String ev = msg.getField(new StringField(1011)).getValue();
+				isMa = ev != null && ev.endsWith("MA");
+			}
+		} catch (FieldNotFound ignored) {
+		}
+		if (!isMa) {
+			FinraAeBodyReorderUtil.syncNoSidesCountToPopulatedGroups(msg);
+		}
+		enforceMaNoSidesCountIfNeeded(msg);
+		if (isMa) {
+			FinraAeBodyReorderUtil.reorderOutboundAeBody(msg);
+			FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
+			try {
+				msg.setField(new NoSides(2));
+			} catch (Exception e) {
+				log.trace("MA final NoSides(2): {}", e.getMessage());
+			}
+		}
+	}
+
+	/** CAMA/SPMA/TSMA require exactly two NoSides groups (552=2). */
+	private void enforceMaNoSidesCountIfNeeded(TradeCaptureReport msg) {
+		try {
+			String ev = msg.getField(new StringField(1011)).getValue();
+			if (ev == null || !ev.endsWith("MA")) {
+				return;
+			}
+			int populated = FinraAeBodyReorderUtil.countPopulatedNoSides(msg);
+			if (populated != 2) {
+				log.info("MA wire fix: NoSides populated={} — rebuilding two sides.", populated);
+				ensureMAHasTwoSidesWithStructure(msg, msg);
+			}
+			msg.setField(new NoSides(2));
+		} catch (Exception e) {
+			log.trace("enforceMaNoSidesCountIfNeeded: {}", e.getMessage());
+		}
 	}
 
 	/**
@@ -1618,7 +1701,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			removeTagsNotExpectedForEN(resTrdCapRpt);   // strip 939, 22002 so format matches valid initiator sample
 			applyAePricingEchoAndFinraCaenOrder(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
-			compliancePipeline.getLifecycleEngine().markAccepted(reqTrdCapRpt.getTradeReportID().getValue(), sessionID);
+			compliancePipeline.getLifecycleEngine().markAccepted(resTrdCapRpt.getTradeReportID().getValue(), sessionID);
+			String productEn = normalizeProductPrefix(securityType);
+			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productEn);
+			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productEn, resTrdCapRpt, MatchStatusEvent.MATCHED);
 
 			if(777 == reqTrdCapRpt.getLastPx().getValue()) {
 				log.info("*****    Processing NEW ALLEGE request....");				
@@ -1680,6 +1766,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			removeTagsNotExpectedForEN(resTrdCapRpt);     // strip 939, 22002 for CR
 			applyAePricingEchoAndFinraCaenOrder(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
+			String productCr = normalizeProductPrefix(securityType);
+			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productCr);
+			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productCr, resTrdCapRpt, MatchStatusEvent.MATCHED);
 			
 			if(777 == reqTrdCapRpt.getLastPx().getValue()) {
 				log.info("Processing ALLEGE for Trade Correction....");
@@ -1744,6 +1833,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			GatewayAllocQtyEcho.stripRootLevelPricingTags(resTrdCapRpt);
 			reorderAckBodyAfterStrip(resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
+			String productCx = normalizeProductPrefix(securityType);
+			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productCx);
+			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productCx, resTrdCapRpt, MatchStatusEvent.UNMATCHED);
 						
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
@@ -1801,6 +1893,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			GatewayAllocQtyEcho.stripRootLevelPricingTags(resTrdCapRpt);
 			reorderAckBodyAfterStrip(resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
+			String productHx = normalizeProductPrefix(securityType);
+			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productHx);
+			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productHx, resTrdCapRpt, MatchStatusEvent.UNMATCHED);
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
 			log.error("Error ::",sessionNotFound);
@@ -1808,6 +1903,264 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			log.error("Error ::",ex);
 			java.util.logging.Logger.getLogger(WizFixApplication.class.getName()).log(Level.SEVERE, null, ex);
 		}
+	}
+
+	private enum MatchStatusEvent {
+		MATCHED, UNMATCHED
+	}
+
+	private String normalizeProductPrefix(String securityType) {
+		if (securityType == null || securityType.isEmpty()) {
+			return "CA";
+		}
+		String s = securityType.trim().toUpperCase();
+		if (s.startsWith("SP")) {
+			return "SP";
+		}
+		if (s.startsWith("TS")) {
+			return "TS";
+		}
+		if (s.startsWith("CA")) {
+			return "CA";
+		}
+		return s.length() >= 2 ? s.substring(0, 2) : s;
+	}
+
+	private void maybeSendMatchStatusAck(TradeCaptureReport req, SessionID sessionID, String productPrefix,
+			TradeCaptureReport ackMsg, MatchStatusEvent event) {
+		try {
+			if (!sendMatchStatusAckEffective(sessionID)) {
+				return;
+			}
+			if (!DealerTradeMatchEligibility.isEligibleForMatchStatus(req)) {
+				return;
+			}
+			MatchStatusContextStore.MatchStatusContext ctx = matchStatusContextStore.resolve(req, ackMsg, productPrefix);
+			if (ctx == null) {
+				log.warn("Match Status skipped: no context for inbound trade.");
+				return;
+			}
+			if (event == MatchStatusEvent.UNMATCHED && !ctx.matched) {
+				log.debug("Match Status skipped: cancel/reversal on trade that was never matched.");
+				return;
+			}
+			int delay = matchStatusAckDelaySecsEffective(sessionID);
+			if (delay > 0) {
+				Thread.sleep(delay * 1000L);
+			}
+			processingTradeMatchStatus(req, sessionID, ctx, event == MatchStatusEvent.UNMATCHED);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		} catch (Exception e) {
+			log.warn("maybeSendMatchStatusAck: {}", e.getMessage(), e);
+		}
+	}
+
+	private void processingTradeMatchStatus(TradeCaptureReport req, SessionID sessionID,
+			MatchStatusContextStore.MatchStatusContext ctx, boolean unmatched) throws FieldNotFound, SessionNotFound {
+		TradeCaptureReport ma = new TradeCaptureReport();
+
+		boolean matched = !unmatched;
+		try {
+			if (req.isSetField(31) && 888 == req.getLastPx().getValue()) {
+				matched = false;
+			}
+		} catch (FieldNotFound ignored) {
+		}
+
+		String product = ctx.productPrefix != null ? ctx.productPrefix : "CA";
+		String matchTradeId = getMatchControlNo(product, matched);
+
+		ma.setField(new StringField(1011, product + "MA"));
+		ma.setField(new TradeReportID(getTrdRptID()));
+		if (ctx.controlDate != null) {
+			ma.setField(new StringField(22011, ctx.controlDate));
+		} else {
+			ma.setField(new StringField(22011, getControlDate()));
+		}
+		if (ctx.tradeId != null && !ctx.tradeId.trim().isEmpty()) {
+			ma.setField(new StringField(1003, ctx.tradeId.trim()));
+		}
+		ma.setField(new StringField(22027, getControlDate()));
+		ma.setField(new StringField(22028, matchTradeId));
+		ma.setField(new TradeReportTransType(3));
+		ma.setField(new IntField(856, 2));
+		ma.setField(new MatchStatus(matched ? '0' : '1'));
+		ma.setField(new PreviouslyReported(false));
+
+		copyMaSpecFieldsFromInbound(ma, req);
+		ma.reverseRoute(req.getHeader());
+		ensureMAHasTwoSidesWithStructure(ma, req);
+		stripNonMaRootScalars(ma);
+		prepareOutboundAeForWire(ma);
+		Session.sendToTarget(ma, sessionID);
+		log.info("Sent Match Status {} for product {} (573={}).", product + "MA", product, matched ? "0" : "1");
+
+		if (matched) {
+			matchStatusContextStore.markMatched(ctx.clientTradeReportId, matchTradeId);
+			try {
+				compliancePipeline.getLifecycleEngine().markMatched(ctx.clientTradeReportId, sessionID);
+			} catch (Exception e) {
+				log.trace("markMatched lifecycle: {}", e.getMessage());
+			}
+		} else {
+			ctx.matched = false;
+		}
+	}
+
+	/** §5.1.11 — echo SettlDate, Instrument, LastQty/LastPx/TradeDate/TransactTime from inbound scalars only. */
+	private void copyMaSpecFieldsFromInbound(TradeCaptureReport ma, TradeCaptureReport inbound) {
+		try {
+			if (inbound.isSetField(64)) {
+				ma.setField(new SettlDate(inbound.getSettlDate().getValue()));
+			}
+			if (inbound.isSetField(32)) {
+				ma.setField(new LastQty(inbound.getLastQty().getValue()));
+			}
+			if (inbound.isSetField(31)) {
+				ma.setField(new LastPx(inbound.getLastPx().getValue()));
+			}
+			if (inbound.isSetField(75)) {
+				ma.setField(new TradeDate(inbound.getTradeDate().getValue()));
+			}
+			if (inbound.isSetField(60)) {
+				ma.setField(new TransactTime(inbound.getTransactTime().getValue()));
+			}
+			String securityId = null;
+			if (inbound.isSetField(48)) {
+				securityId = inbound.getField(new StringField(48)).getValue();
+			}
+			if (securityId == null || securityId.trim().isEmpty()) {
+				return;
+			}
+			securityId = securityId.trim();
+			Instrument outInst = new Instrument();
+			outInst.set(new SecurityID(securityId));
+			outInst.set(new SecurityIDSource(SecurityIDSource.CUSIP));
+			outInst.set(new NoSecurityAltID(1));
+			TradeCaptureReport.NoSecurityAltID alt = new TradeCaptureReport.NoSecurityAltID();
+			alt.set(new SecurityAltIDSource(FinraSecurityIDSource.SYMBOL));
+			alt.set(new SecurityAltID(securityId));
+			outInst.addGroup(alt);
+			ma.set(outInst);
+		} catch (Exception e) {
+			log.trace("copyMaSpecFieldsFromInbound: {}", e.getMessage());
+		}
+	}
+
+	/** §5.1.11 root scalars only — strip anything copied from inbound that is not in the spec table. */
+	private void stripNonMaRootScalars(TradeCaptureReport msg) {
+		final int[] allowed = {
+			1011, 571, 22011, 1003, 22027, 22028, 487, 856, 573, 570, 64,
+			48, 22, 454, 455, 456, 32, 31, 75, 60, 552, 797
+		};
+		try {
+			for (int tag = 1; tag <= 23000; tag++) {
+				if (tag == 552 || FinraAeBodyReorderUtil.isNoSidesOnlyBodyTag(tag)) {
+					continue;
+				}
+				if (!msg.isSetField(tag)) {
+					continue;
+				}
+				boolean ok = false;
+				for (int a : allowed) {
+					if (a == tag) {
+						ok = true;
+						break;
+					}
+				}
+				if (!ok) {
+					try {
+						msg.removeField(tag);
+					} catch (Exception ignored) {
+					}
+				}
+			}
+		} catch (Exception e) {
+			log.trace("stripNonMaRootScalars: {}", e.getMessage());
+		}
+	}
+
+	private void ensureMAHasTwoSidesWithStructure(TradeCaptureReport ma, TradeCaptureReport inbound) {
+		try {
+			MaSideParties parties = extractMaPartiesFromInbound(inbound);
+			FinraAeBodyReorderUtil.clearNoSides(ma);
+			ma.addGroup(buildSidesGroup(parties.executingSide, parties.executingMpid, 1));
+			ma.addGroup(buildSidesGroup(parties.contraSide, parties.contraMpid, 17));
+			ma.setField(new NoSides(2));
+			log.debug("ensureMAHasTwoSidesWithStructure: set exactly two sides for MA (552=2).");
+		} catch (Exception e) {
+			log.trace("ensureMAHasTwoSidesWithStructure: {}", e.getMessage());
+			try {
+				FinraAeBodyReorderUtil.clearNoSides(ma);
+				ma.addGroup(buildSidesGroup('2', "JPMS", 1));
+				ma.addGroup(buildSidesGroup('1', "BCAP", 17));
+				ma.setField(new NoSides(2));
+			} catch (Exception ignored) {
+			}
+		}
+	}
+
+	private static final class MaSideParties {
+		char executingSide = '2';
+		String executingMpid = "JPMS";
+		char contraSide = '1';
+		String contraMpid = "BCAP";
+	}
+
+	private MaSideParties extractMaPartiesFromInbound(TradeCaptureReport inbound) {
+		MaSideParties p = new MaSideParties();
+		try {
+			int n = inbound.getNoSides().getValue();
+			for (int i = 1; i <= n; i++) {
+				TradeCaptureReport.NoSides side = new TradeCaptureReport.NoSides();
+				inbound.getGroup(i, side);
+				char sideVal = p.executingSide;
+				try {
+					if (side.isSetField(54)) {
+						sideVal = side.getSide().getValue();
+					}
+				} catch (FieldNotFound ignored) {
+				}
+				int parties = 0;
+				try {
+					parties = side.getParties().getNoPartyIDs().getValue();
+				} catch (FieldNotFound ignored) {
+					continue;
+				}
+				for (int j = 1; j <= parties; j++) {
+					TradeCaptureReport.NoSides.NoPartyIDs party = new TradeCaptureReport.NoSides.NoPartyIDs();
+					side.getGroup(j, party);
+					try {
+						int role = party.getPartyRole().getValue();
+						String mpid = party.getPartyID().getValue();
+						if (role == 17 && mpid != null && !mpid.trim().isEmpty()) {
+							p.contraMpid = mpid.trim();
+							p.contraSide = sideVal;
+						} else if (role == 1 && mpid != null && !mpid.trim().isEmpty()) {
+							p.executingMpid = mpid.trim();
+							p.executingSide = sideVal;
+						}
+					} catch (FieldNotFound ignored) {
+					}
+				}
+			}
+		} catch (FieldNotFound ignored) {
+		}
+		return p;
+	}
+
+	private String getMatchControlNo(String productPrefix, boolean matched) {
+		String prefix;
+		if ("CA".equalsIgnoreCase(productPrefix)) {
+			prefix = matched ? "2" : "221";
+		} else if ("TS".equalsIgnoreCase(productPrefix)) {
+			prefix = matched ? "7" : "721";
+		} else {
+			prefix = matched ? "1" : "121";
+		}
+		long id = nextID++ % 10000000L;
+		return String.format("%s%07d", prefix, id);
 	}
 	
 	//Allege
@@ -1984,6 +2337,12 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	 * Required per spec_required_tags: 571, 32, 31, 75, 60, 552, 48, 22, 64, 939 (+ conditional 487, 22011, etc.).
 	 */
 	private void ensureMandatoryFieldsForAE(TradeCaptureReport msg) {
+		boolean isMa = false;
+		try {
+			String ev = msg.getField(new StringField(1011)).getValue();
+			isMa = ev != null && ev.endsWith("MA");
+		} catch (Exception ignored) {
+		}
 		try {
 			if (!msg.isSetField(new SettlDate())) {
 				try {
@@ -1994,30 +2353,34 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				log.debug("ensureMandatoryFieldsForAE: set SettlDate(64) from TradeDate or ControlDate.");
 			}
 		} catch (Exception e) { log.trace("SettlDate check: {}", e.getMessage()); }
-		try {
-			if (!msg.isSetField(new TradeReportType())) {
-				msg.setField(new TradeReportType(TradeReportType.SUBMIT));
-				log.debug("ensureMandatoryFieldsForAE: set TradeReportType(939)=SUBMIT.");
-			}
-		} catch (Exception e) { log.trace("TradeReportType check: {}", e.getMessage()); }
-		try {
-			if (!msg.isSetField(new TradeReportTransType())) {
-				msg.setField(new TradeReportTransType(TradeReportTransType.NEW));
-				log.debug("ensureMandatoryFieldsForAE: set TradeReportTransType(487)=NEW.");
-			}
-		} catch (Exception e) { log.trace("TradeReportTransType check: {}", e.getMessage()); }
+		if (!isMa) {
+			try {
+				if (!msg.isSetField(new TradeReportType())) {
+					msg.setField(new TradeReportType(TradeReportType.SUBMIT));
+					log.debug("ensureMandatoryFieldsForAE: set TradeReportType(939)=SUBMIT.");
+				}
+			} catch (Exception e) { log.trace("TradeReportType check: {}", e.getMessage()); }
+			try {
+				if (!msg.isSetField(new TradeReportTransType())) {
+					msg.setField(new TradeReportTransType(TradeReportTransType.NEW));
+					log.debug("ensureMandatoryFieldsForAE: set TradeReportTransType(487)=NEW.");
+				}
+			} catch (Exception e) { log.trace("TradeReportTransType check: {}", e.getMessage()); }
+		}
 		try {
 			if (!msg.isSetField(new StringField(22011))) {
 				msg.setField(new StringField(22011, getControlDate()));
 				log.debug("ensureMandatoryFieldsForAE: set ControlDate(22011).");
 			}
 		} catch (Exception e) { log.trace("ControlDate check: {}", e.getMessage()); }
-		try {
-			if (!msg.isSetField(939)) {
-				msg.setField(new IntField(939, 0)); // 939 per FINRA spec (report type / status)
-				log.debug("ensureMandatoryFieldsForAE: set 939=0.");
-			}
-		} catch (Exception e) { log.trace("939 check: {}", e.getMessage()); }
+		if (!isMa) {
+			try {
+				if (!msg.isSetField(939)) {
+					msg.setField(new IntField(939, 0)); // 939 per FINRA spec (report type / status)
+					log.debug("ensureMandatoryFieldsForAE: set 939=0.");
+				}
+			} catch (Exception e) { log.trace("939 check: {}", e.getMessage()); }
+		}
 	}
 
 	/** Fill default values for CAEN/SPEN/TSEN (and CACR/SPCR/TSCR) body fields when missing or blank so FIX engine and initiator accept. */
@@ -2096,6 +2459,24 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		try { eventSource = msg.getField(new StringField(1011)).getValue(); } catch (Exception e) { return; }
 		if (eventSource == null || eventSource.length() < 2) return;
 		String suffix = eventSource.substring(eventSource.length() - 2);
+		if ("MA".equals(suffix)) {
+			try {
+				msg.setField(new TradeReportTransType(3)); // §5.1.11 CAMA: Release
+				msg.setField(new IntField(856, 2)); // §5.1.11 CAMA: Accept
+				if (!msg.isSetField(570)) {
+					msg.setField(new StringField(570, "N"));
+				}
+				if (!msg.isSetField(22027)) {
+					msg.setField(new StringField(22027, getControlDate()));
+				}
+				if (!msg.isSetField(573)) {
+					msg.setField(new IntField(573, 0));
+				}
+			} catch (Exception e) {
+				log.trace("ensureExpectedFieldsForInitiator MA: {}", e.getMessage());
+			}
+			return;
+		}
 		boolean isCX = "CX".equals(suffix);
 		boolean isHX = "HX".equals(suffix);
 		try {
@@ -2255,11 +2636,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	 * JPMS rejects 552 when it does not equal the actual repeating-group count (including leftover sides after partial replace).
 	 */
 	private void clearAllNoSides(TradeCaptureReport msg) {
-		try {
-			msg.removeField(552);
-		} catch (Exception e) {
-			log.trace("clearAllNoSides: {}", e.getMessage());
-		}
+		FinraAeBodyReorderUtil.clearNoSides(msg);
 	}
 
 	/** For CAHX/SPHX/TSHX: ensure 552=2 with two sides matching valid format (first side 453=2 TEST/JPMB, 528/58; second side C/17). */
@@ -2404,16 +2781,18 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	}*/
 	
 	private String getFinraControlNo(String secType) {
-		
-		
-		if("TS".equalsIgnoreCase( secType)) {
-			// return "7"+Long.valueOf((nextID++) * System.nanoTime()).toString().substring(0, 9);
-			return "7"+nextID++;
-		}else {
-			//return "1"+Long.valueOf((nextID++) * System.nanoTime()).toString().substring(0, 9);
-			return "1"+nextID++;
+		String s = secType != null ? secType.trim().toUpperCase() : "";
+		String prefix;
+		if (s.startsWith("TS")) {
+			prefix = "7";
+		} else if (s.startsWith("CA")) {
+			prefix = "2";
+		} else if (s.startsWith("SP")) {
+			prefix = "1";
+		} else {
+			prefix = "1";
 		}
-		
+		return prefix + String.format("%09d", nextID++ % 1000000000L);
 	}
 		 
 	private static class TradeRptStatus extends IntField {

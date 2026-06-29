@@ -6871,7 +6871,26 @@
 	<field number="22009" name="PreparationTime" type="UTCTIMEONLY"/>
 	<field number="22034" name="NoRemunerationIndicator" type="STRING"/>
 	<field number="22036" name="ATSExecutionMPID" type="STRING"/>	
-	<field number="1011" name="MessageEventSource" type="STRING"/>	
+	<field number="1011" name="MessageEventSource" type="STRING">
+		<value enum="SPEN" description="CONFIRMED_TRADE_ENTRY"/>
+		<value enum="SPAL" description="TRADE_ENTRY_ALLEGE"/>
+		<value enum="SPCR" description="CONFIRMED_CORRECTION"/>
+		<value enum="SPCX" description="CONFIRMED_CANCEL"/>
+		<value enum="SPHX" description="CONFIRMED_REVERSAL"/>
+		<value enum="SPMA" description="CONFIRMED_MATCH_STATUS"/>
+		<value enum="CAEN" description="CONFIRMED_TRADE_ENTRY"/>
+		<value enum="CAAL" description="TRADE_ENTRY_ALLEGE"/>
+		<value enum="CACR" description="CONFIRMED_CORRECTION"/>
+		<value enum="CACX" description="CONFIRMED_CANCEL"/>
+		<value enum="CAHX" description="CONFIRMED_REVERSAL"/>
+		<value enum="CAMA" description="CONFIRMED_MATCH_STATUS"/>
+		<value enum="TSEN" description="CONFIRMED_TRADE_ENTRY"/>
+		<value enum="TSAL" description="TRADE_ENTRY_ALLEGE"/>
+		<value enum="TSCR" description="CONFIRMED_CORRECTION"/>
+		<value enum="TSCX" description="CONFIRMED_CANCEL"/>
+		<value enum="TSHX" description="CONFIRMED_REVERSAL"/>
+		<value enum="TSMA" description="CONFIRMED_MATCH_STATUS"/>
+	</field>
 	<field number="20453" name="OriginalNoPartyIDs" type="NUMINGROUP"/>
 	<field number="20448" name="OriginalPartyID" type="STRING"/>
 	<field number="20447" name="OriginalPartyIDSource" type="CHAR"/>

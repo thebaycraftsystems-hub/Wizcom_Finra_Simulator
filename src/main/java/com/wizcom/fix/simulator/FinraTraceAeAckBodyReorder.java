@@ -134,7 +134,13 @@ public final class FinraTraceAeAckBodyReorder {
 			for (int i = 1; i <= nSides; i++) {
 				TradeCaptureReport.NoSides g = new TradeCaptureReport.NoSides();
 				msg.getGroup(i, g);
+				if ("MA".equals(suf) && !g.isSetField(54)) {
+					continue;
+				}
 				sides.add(g);
+			}
+			if ("MA".equals(suf) && sides.size() > 2) {
+				sides = new ArrayList<>(sides.subList(0, 2));
 			}
 
 			Map<Integer, String> full = FinraAeBodyReorderUtil.snapshotRootScalars(msg);
@@ -145,10 +151,7 @@ public final class FinraTraceAeAckBodyReorder {
 					log.trace("remove tag {}: {}", tag, e.getMessage());
 				}
 			}
-			try {
-				msg.removeField(552);
-			} catch (Exception ignored) {
-			}
+			FinraAeBodyReorderUtil.clearNoSides(msg);
 
 			Map<Integer, String> captured = new LinkedHashMap<>(full);
 			for (int t : new int[] { 48, 22, 454, 455, 456 }) {
@@ -166,7 +169,9 @@ public final class FinraTraceAeAckBodyReorder {
 			}
 
 			FinraAeBodyReorderUtil.applyOrderedTags(msg, post, captured);
-			FinraAeBodyReorderUtil.appendLeftoverRootTags(msg, captured);
+			if (!"MA".equals(suf)) {
+				FinraAeBodyReorderUtil.appendLeftoverRootTags(msg, captured);
+			}
 		} catch (Exception e) {
 			log.warn("FinraTraceAeAckBodyReorder: {}", e.getMessage());
 		}

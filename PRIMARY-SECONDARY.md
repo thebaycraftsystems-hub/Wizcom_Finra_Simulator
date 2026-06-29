@@ -48,7 +48,7 @@ This document describes how the **Primary** and **Secondary (Backup)** simulator
 
 | Setting            | Primary                      | Secondary                          |
 |--------------------|-----------------------------|------------------------------------|
-| Config file        | quickfixj-server.cfg        | quickfixj-server-secondary.cfg     |
+| Config file        | -server.cfg        | quickfixj-server-secondary.cfg     |
 | SimulatorRole      | (not set)                   | Secondary                          |
 | FileStorePath      | data                        | data-secondary                     |
 | FileLogPath        | logs                        | logs-secondary                     |

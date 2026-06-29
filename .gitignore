@@ -54,7 +54,6 @@ nbdist/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
-
 # Logs
 logs/
 *.log
@@ -70,3 +69,4 @@ docs/Specification/.lucene-index/
 # Other
 *.swp
 *~
+

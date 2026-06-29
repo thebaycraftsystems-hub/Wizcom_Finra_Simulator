@@ -7159,6 +7159,9 @@
 			<value enum="TSCR" description="CONFIRMED_CORRECTION"/>
 			<value enum="TSCX" description="CONFIRMED_CANCEL"/>
 			<value enum="TSHX" description="CONFIRMED_REVERSAL"/>
+			<value enum="CAMA" description="CONFIRMED_MATCH_STATUS"/>
+			<value enum="SPMA" description="CONFIRMED_MATCH_STATUS"/>
+			<value enum="TSMA" description="CONFIRMED_MATCH_STATUS"/>
 		</field>	
 		<field number="20453" name="OriginalNoPartyIDs" type="NUMINGROUP"/>
 		<field number="20448" name="OriginalPartyID" type="STRING"/>

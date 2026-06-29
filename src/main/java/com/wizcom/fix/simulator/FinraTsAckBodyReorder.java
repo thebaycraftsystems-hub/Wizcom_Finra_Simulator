@@ -140,12 +140,17 @@ public final class FinraTsAckBodyReorder {
 			} catch (FieldNotFound ignored) {
 				nSides = 0;
 			}
-			List<TradeCaptureReport.NoSides> sides = new ArrayList<>();
-			for (int i = 1; i <= nSides; i++) {
-				TradeCaptureReport.NoSides g = new TradeCaptureReport.NoSides();
-				msg.getGroup(i, g);
-				sides.add(g);
+			boolean isMa = false;
+			try {
+				if (msg.isSetField(1011)) {
+					StringField sf = new StringField(1011);
+					msg.getField(sf);
+					String ev = sf.getValue();
+					isMa = ev != null && ev.endsWith("MA");
+				}
+			} catch (FieldNotFound ignored) {
 			}
+			List<TradeCaptureReport.NoSides> sides = FinraAeBodyReorderUtil.snapshotNoSidesGroups(msg, isMa ? 2 : -1);
 
 			Map<Integer, String> full = FinraAeBodyReorderUtil.snapshotRootScalars(msg);
 			for (Integer tag : full.keySet()) {
@@ -155,10 +160,7 @@ public final class FinraTsAckBodyReorder {
 					log.trace("remove tag {}: {}", tag, e.getMessage());
 				}
 			}
-			try {
-				msg.removeField(552);
-			} catch (Exception ignored) {
-			}
+			FinraAeBodyReorderUtil.clearNoSides(msg);
 
 			Map<Integer, String> captured = new LinkedHashMap<>(full);
 			for (int t : new int[] { 48, 22, 454, 455, 456 }) {
@@ -176,7 +178,9 @@ public final class FinraTsAckBodyReorder {
 			}
 
 			FinraAeBodyReorderUtil.applyOrderedTags(msg, postBlock, captured);
-			FinraAeBodyReorderUtil.appendLeftoverRootTags(msg, captured);
+			if (!isMa) {
+				FinraAeBodyReorderUtil.appendLeftoverRootTags(msg, captured);
+			}
 		} catch (Exception e) {
 			log.warn("FinraTsAckBodyReorder: {}", e.getMessage());
 		}
