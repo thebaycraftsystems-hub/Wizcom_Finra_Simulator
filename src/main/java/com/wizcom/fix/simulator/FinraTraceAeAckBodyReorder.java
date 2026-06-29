@@ -171,6 +171,8 @@ public final class FinraTraceAeAckBodyReorder {
 			FinraAeBodyReorderUtil.applyOrderedTags(msg, post, captured);
 			if (!"MA".equals(suf)) {
 				FinraAeBodyReorderUtil.appendLeftoverRootTags(msg, captured);
+			} else {
+				FinraAeBodyReorderUtil.finalizeMaNoSidesCount(msg);
 			}
 		} catch (Exception e) {
 			log.warn("FinraTraceAeAckBodyReorder: {}", e.getMessage());

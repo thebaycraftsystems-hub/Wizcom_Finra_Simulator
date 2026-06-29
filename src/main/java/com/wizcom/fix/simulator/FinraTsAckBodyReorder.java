@@ -178,7 +178,9 @@ public final class FinraTsAckBodyReorder {
 			}
 
 			FinraAeBodyReorderUtil.applyOrderedTags(msg, postBlock, captured);
-			if (!isMa) {
+			if (isMa) {
+				FinraAeBodyReorderUtil.finalizeMaNoSidesCount(msg);
+			} else {
 				FinraAeBodyReorderUtil.appendLeftoverRootTags(msg, captured);
 			}
 		} catch (Exception e) {

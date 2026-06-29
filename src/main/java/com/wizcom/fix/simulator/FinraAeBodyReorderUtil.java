@@ -1,6 +1,7 @@
 package com.wizcom.fix.simulator;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.slf4j.Logger;
@@ -135,6 +136,41 @@ public final class FinraAeBodyReorderUtil {
 		} catch (Exception e) {
 			log.trace("syncNoSidesCount: {}", e.getMessage());
 		}
+	}
+
+	/**
+	 * Rebuild NoSides from at most {@code maxGroups} populated groups and set 552 (FIX44 allows only 1 or 2).
+	 */
+	public static void finalizeNoSidesCount(TradeCaptureReport msg, int maxGroups) {
+		if (msg == null || maxGroups < 1) {
+			return;
+		}
+		List<TradeCaptureReport.NoSides> sides = snapshotNoSidesGroups(msg, maxGroups);
+		clearNoSides(msg);
+		for (TradeCaptureReport.NoSides side : sides) {
+			msg.addGroup(side);
+		}
+		int populated = countPopulatedNoSides(msg);
+		if (populated < 1) {
+			return;
+		}
+		int n = Math.min(populated, maxGroups);
+		if (n > 2) {
+			n = 2;
+		}
+		try {
+			msg.setField(new NoSides(n));
+		} catch (Exception e) {
+			log.trace("finalizeNoSidesCount: {}", e.getMessage());
+		}
+	}
+
+	/**
+	 * CAMA/SPMA/TSMA: JPMS FIX44 allows only {@code 552=1} or {@code 552=2}. Rebuild from at most two
+	 * populated groups so reorder/resend cannot leave {@code 552=5} with extra NoSides on the wire.
+	 */
+	public static void finalizeMaNoSidesCount(TradeCaptureReport msg) {
+		finalizeNoSidesCount(msg, 2);
 	}
 
 	public static boolean hasRootSideTags(Message msg) {

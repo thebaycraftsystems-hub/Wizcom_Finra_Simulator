@@ -71,18 +71,7 @@ public final class FinraSpAckBodyReorder {
 				hasInstrument = false;
 			}
 
-			int nSides = 0;
-			try {
-				nSides = msg.getNoSides().getValue();
-			} catch (FieldNotFound ignored) {
-				nSides = 0;
-			}
-			List<TradeCaptureReport.NoSides> sides = new ArrayList<>();
-			for (int i = 1; i <= nSides; i++) {
-				TradeCaptureReport.NoSides g = new TradeCaptureReport.NoSides();
-				msg.getGroup(i, g);
-				sides.add(g);
-			}
+			List<TradeCaptureReport.NoSides> sides = FinraAeBodyReorderUtil.snapshotNoSidesGroups(msg, 2);
 
 			Map<Integer, String> full = FinraAeBodyReorderUtil.snapshotRootScalars(msg);
 			for (Integer tag : full.keySet()) {
@@ -92,10 +81,7 @@ public final class FinraSpAckBodyReorder {
 					log.trace("remove tag {}: {}", tag, e.getMessage());
 				}
 			}
-			try {
-				msg.removeField(552);
-			} catch (Exception ignored) {
-			}
+			FinraAeBodyReorderUtil.clearNoSides(msg);
 
 			Map<Integer, String> captured = new LinkedHashMap<>(full);
 			for (int t : new int[] { 48, 22, 454, 455, 456 }) {
@@ -110,6 +96,11 @@ public final class FinraSpAckBodyReorder {
 
 			for (TradeCaptureReport.NoSides side : sides) {
 				msg.addGroup(side);
+			}
+			try {
+				msg.setField(new quickfix.field.NoSides(sides.size()));
+			} catch (Exception e) {
+				log.trace("set NoSides after SPEN reorder: {}", e.getMessage());
 			}
 
 			FinraAeBodyReorderUtil.applyOrderedTags(msg, POST_SIDES_BLOCK_SP, captured);

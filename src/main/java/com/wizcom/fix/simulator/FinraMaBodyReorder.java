@@ -90,6 +90,7 @@ public final class FinraMaBodyReorder {
 			}
 
 			FinraAeBodyReorderUtil.applyOrderedTags(msg, POST_MA, captured);
+			FinraAeBodyReorderUtil.finalizeMaNoSidesCount(msg);
 			// §5.1.11: do not append tags outside the spec table
 		} catch (Exception e) {
 			log.warn("FinraMaBodyReorder: {}", e.getMessage());

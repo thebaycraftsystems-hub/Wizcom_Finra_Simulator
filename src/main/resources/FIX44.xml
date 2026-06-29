@@ -2992,6 +2992,8 @@
 	<field name="ControlDate" required="N"/>	
 	<field name="OrigTradeID" required="N"/>
 	<field name="OrigControlDate" required="N"/>	
+	<field name="MatchControlDate" required="N"/>
+	<field name="MatchTradeID" required="N"/>
 	<field name="FirmTradeID" required="N"/>	
 	<field name="SecondaryFirmTradeID" required="N"/> 
 	<field name="AsOfIndicator" required="N"/>
@@ -6854,6 +6856,8 @@
 	<field number="22011" name="ControlDate" type="LOCALMKTDATE"/>	
 	<field number="1126" name="OrigTradeID" type="INT"/>
 	<field number="22012" name="OrigControlDate" type="LOCALMKTDATE"/>	
+	<field number="22027" name="MatchControlDate" type="LOCALMKTDATE"/>
+	<field number="22028" name="MatchTradeID" type="STRING"/>
 
 	<field number="1041" name="FirmTradeID" type="STRING"/> 
 	<field number="1042" name="SecondaryFirmTradeID" type="STRING"/> 

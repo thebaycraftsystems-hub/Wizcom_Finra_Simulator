@@ -1521,10 +1521,6 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				ensureCXHasOneSideWithStructure(msg);
 				return;
 			}
-			if ("MA".equals(suffix)) {
-				ensureMAHasTwoSidesWithStructure(msg, msg);
-				return;
-			}
 		}
 		ensureResponseHasSides(msg);
 	}
@@ -1532,8 +1528,13 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	/**
 	 * Single outbound AE wire pipeline: repair NoSides → FINRA reorder → strip illegal root tags → sync 552.
 	 * Used on first send ({@code applyAePricingEchoAndFinraCaenOrder}) and every {@code toApp} (including 43=Y resend).
+	 * Match Status (SPMA/CAMA/TSMA) uses a separate path so existing EN/CR/CX/HX ack behavior is unchanged.
 	 */
 	private void prepareOutboundAeForWire(TradeCaptureReport msg) {
+		if (isMatchStatusMessage(msg)) {
+			prepareMatchStatusOutboundAeForWire(msg);
+			return;
+		}
 		repairOutboundAeNoSidesForWire(msg);
 		FinraAeBodyReorderUtil.reorderOutboundAeBody(msg);
 		FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
@@ -1547,27 +1548,42 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			FinraAeBodyReorderUtil.reorderOutboundAeBody(msg);
 			FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
 		}
-		boolean isMa = false;
+		FinraAeBodyReorderUtil.syncNoSidesCountToPopulatedGroups(msg);
+	}
+
+	private boolean isMatchStatusMessage(TradeCaptureReport msg) {
 		try {
 			if (msg.isSetField(1011)) {
 				String ev = msg.getField(new StringField(1011)).getValue();
-				isMa = ev != null && ev.endsWith("MA");
+				return ev != null && ev.endsWith("MA");
 			}
 		} catch (FieldNotFound ignored) {
 		}
-		if (!isMa) {
-			FinraAeBodyReorderUtil.syncNoSidesCountToPopulatedGroups(msg);
-		}
+		return false;
+	}
+
+	/** Wire prep for SPMA/CAMA/TSMA only — does not alter EN/CR/CX/HX ack pipeline. */
+	private void prepareMatchStatusOutboundAeForWire(TradeCaptureReport msg) {
+		repairMatchStatusNoSidesForWire(msg);
+		FinraAeBodyReorderUtil.reorderOutboundAeBody(msg);
+		FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
 		enforceMaNoSidesCountIfNeeded(msg);
-		if (isMa) {
-			FinraAeBodyReorderUtil.reorderOutboundAeBody(msg);
-			FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
-			try {
-				msg.setField(new NoSides(2));
-			} catch (Exception e) {
-				log.trace("MA final NoSides(2): {}", e.getMessage());
-			}
+		FinraAeBodyReorderUtil.finalizeMaNoSidesCount(msg);
+		FinraAeBodyReorderUtil.stripNoSidesTagsFromRoot(msg);
+		try {
+			msg.setField(new NoSides(2));
+		} catch (Exception e) {
+			log.trace("MA final NoSides(2): {}", e.getMessage());
 		}
+	}
+
+	private void repairMatchStatusNoSidesForWire(TradeCaptureReport msg) {
+		int populated = FinraAeBodyReorderUtil.countPopulatedNoSides(msg);
+		if (populated == 2) {
+			return;
+		}
+		log.info("MA wire repair: NoSides populated={} — rebuilding two sides.", populated);
+		ensureMAHasTwoSidesWithStructure(msg, msg);
 	}
 
 	/** CAMA/SPMA/TSMA require exactly two NoSides groups (552=2). */
@@ -2680,6 +2696,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			clearAllNoSides(msg);
 			msg.addGroup(firstSide);
 			msg.addGroup(secondSide);
+			msg.setField(new NoSides(2));
 			log.debug("ensureENHasTwoSidesWithStructure: set exactly two sides for EN.");
 		} catch (Exception e) { log.trace("ensureENHasTwoSidesWithStructure: {}", e.getMessage()); }
 	}
