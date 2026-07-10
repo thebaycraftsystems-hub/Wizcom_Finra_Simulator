@@ -2,6 +2,7 @@ package com.wizcom.fix.simulator;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +19,11 @@ public final class MatchStatusContextStore {
 	private static final Logger log = LoggerFactory.getLogger(MatchStatusContextStore.class);
 
 	private final ConcurrentMap<String, MatchStatusContext> byKey = new ConcurrentHashMap<>();
+
+	/** JPM client trade family (571 before ':') → stable 10-digit MatchTradeID (22028) for MA. */
+	private final ConcurrentMap<String, String> matchTradeIdByClientFamily = new ConcurrentHashMap<>();
+
+	private static final AtomicInteger matchTradeIdSeq = new AtomicInteger(1);
 
 	public static final class MatchStatusContext {
 		public final String clientTradeReportId;
@@ -66,6 +72,13 @@ public final class MatchStatusContextStore {
 			if (prior != null) {
 				ctx.matched = prior.matched;
 				ctx.matchTradeId = prior.matchTradeId;
+			}
+			String family = clientTradeFamilyKey(clientId);
+			if ((ctx.matchTradeId == null || ctx.matchTradeId.isEmpty()) && !family.isEmpty()) {
+				String fromFamily = matchTradeIdByClientFamily.get(family);
+				if (fromFamily != null) {
+					ctx.matchTradeId = fromFamily;
+				}
 			}
 			byKey.put(clientId, ctx);
 			byKey.put(finraId, ctx);
@@ -116,7 +129,47 @@ public final class MatchStatusContextStore {
 		if (ctx != null) {
 			ctx.matched = true;
 			ctx.matchTradeId = matchTradeId;
+			String family = clientTradeFamilyKey(ctx.clientTradeReportId);
+			if (!family.isEmpty() && matchTradeId != null) {
+				matchTradeIdByClientFamily.put(family, matchTradeId);
+			}
 		}
+	}
+
+	/**
+	 * JPM initiator {@code 571} values such as {@code CB20260709000003:1} and {@code CB20260709000003:2}
+	 * share the same family key ({@code CB20260709000003}) and receive the same {@code 22028} on MA.
+	 */
+	public static String clientTradeFamilyKey(String client571) {
+		if (client571 == null) {
+			return "";
+		}
+		String s = client571.trim();
+		if (s.isEmpty()) {
+			return "";
+		}
+		int colon = s.lastIndexOf(':');
+		if (colon > 0) {
+			return s.substring(0, colon);
+		}
+		return s;
+	}
+
+	/** Resolve or allocate a 10-digit numeric MatchTradeID for the JPM client trade family. */
+	public String resolveOrAllocateMatchTradeId(String client571) {
+		String family = clientTradeFamilyKey(client571);
+		if (family.isEmpty()) {
+			return allocateTenDigitMatchTradeId();
+		}
+		return matchTradeIdByClientFamily.computeIfAbsent(family, k -> allocateTenDigitMatchTradeId());
+	}
+
+	private static String allocateTenDigitMatchTradeId() {
+		long n = matchTradeIdSeq.getAndIncrement() % 10_000_000_000L;
+		if (n <= 0) {
+			n = 1;
+		}
+		return String.format("%010d", n);
 	}
 
 	private MatchStatusContext lookup(TradeCaptureReport inboundReq) {

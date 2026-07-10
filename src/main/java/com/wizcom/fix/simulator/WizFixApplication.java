@@ -1985,7 +1985,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		}
 
 		String product = ctx.productPrefix != null ? ctx.productPrefix : "CA";
-		String matchTradeId = getMatchControlNo(product, matched);
+		String matchTradeId = ctx.matchTradeId;
+		if (matchTradeId == null || matchTradeId.trim().isEmpty()) {
+			matchTradeId = matchStatusContextStore.resolveOrAllocateMatchTradeId(ctx.clientTradeReportId);
+		}
 
 		ma.setField(new StringField(1011, product + "MA"));
 		ma.setField(new TradeReportID(getTrdRptID()));
