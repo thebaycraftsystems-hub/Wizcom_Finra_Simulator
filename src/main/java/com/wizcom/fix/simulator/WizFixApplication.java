@@ -590,8 +590,19 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 								logonMsgSeqNum, nextSender);
 					}
 					if (logonMsgSeqNum > dbSeq.incomingSeqNum) {
-						log.info("Logon(34={}): sequence numbers were missing (DB had expected {}); gap {}..{} requested by engine via ResendRequest if configured.",
-								logonMsgSeqNum, dbSeq.incomingSeqNum, dbSeq.incomingSeqNum, logonMsgSeqNum - 1);
+						boolean recoverGap = getBoolSetting(arg1, "RecoverInboundGapOnLogon", true);
+						if (recoverGap && dbSeq.incomingSeqNum >= 1) {
+							// Correct FIX recovery: keep expected inbound at the DB's next-expected so the engine
+							// treats this Logon as a gap and drives recovery — sends 789=expected (with
+							// EnableNextExpectedMsgSeqNum=Y) and/or ResendRequest(BeginSeqNo=expected, 0) — instead of
+							// silently skipping the missing messages by jumping expected inbound to the Logon seq.
+							storeNextTarget = dbSeq.incomingSeqNum;
+							log.warn("Logon(34={}): inbound gap {}..{} — RecoverInboundGapOnLogon=Y: keeping expected inbound at {} so engine recovers missing messages via 789/ResendRequest (NOT skipping). Set RecoverInboundGapOnLogon=N to skip instead.",
+									logonMsgSeqNum, dbSeq.incomingSeqNum, logonMsgSeqNum - 1, storeNextTarget);
+						} else {
+							log.info("Logon(34={}): sequence numbers were missing (DB had expected {}); gap {}..{} — RecoverInboundGapOnLogon=N: skipping to Logon seq (missing messages NOT requested).",
+									logonMsgSeqNum, dbSeq.incomingSeqNum, dbSeq.incomingSeqNum, logonMsgSeqNum - 1);
+						}
 					}
 					if (dbSeq.incomingSeqNum > logonMsgSeqNum + 1) {
 						log.debug("Logon(34={}): DB had expected {}; setting store so 789={} (initiator's next accepted).",
@@ -637,7 +648,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				}
 
 				session.setNextTargetMsgSeqNum(storeNextTarget);
-				log.debug("Logon(34={}): set store so engine sends 789={} (expect initiator next {}); store/DB updated.", logonMsgSeqNum, logonMsgSeqNum + 1, logonMsgSeqNum + 1);
+				log.debug("Logon(34={}): set expected inbound to {} (engine sends 789 accordingly); store/DB updated.", logonMsgSeqNum, storeNextTarget);
 				try {
 					session.setNextSenderMsgSeqNum(nextSender);
 					log.info("Logon: set next sender seq to {} (TRACE_FIX_SESSIONS / 789 / engine max — shared across Primary/Secondary when UseJdbcStore=Y).", nextSender);

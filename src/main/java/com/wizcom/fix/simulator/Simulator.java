@@ -206,14 +206,43 @@ public class Simulator {
         String password = settings.getString(anySession, "JdbcPassword");
         String driverClassName = settings.getString(anySession, "JdbcDriver");
         HikariConfig config = new HikariConfig();
+        config.setPoolName("FixSimulator-" + role);
         config.setJdbcUrl(url);
         config.setUsername(user);
         config.setPassword(password);
         config.setDriverClassName(driverClassName);
-        config.setMaximumPoolSize(10);
-        config.setMinimumIdle(2);
-        log.info("Using HikariCP DataSource for JDBC store/log (bypasses Proxool)");
+        config.setMaximumPoolSize((int) getLongSetting(settings, anySession, "JdbcMaxPoolSize", 10));
+        config.setMinimumIdle((int) getLongSetting(settings, anySession, "JdbcMinIdle", 2));
+        // Resilience against transient DB/network drops (e.g. SQLSTATE 08S01 "Socket closed").
+        // HikariCP validates every connection before handing it out and evicts broken ones; these
+        // settings make it recover quickly and recycle connections before an idle firewall/network
+        // device silently kills them, instead of handing out a dead connection to the FIX threads.
+        config.setConnectionTimeout(getLongSetting(settings, anySession, "JdbcConnectionTimeoutMs", 30000));
+        config.setValidationTimeout(getLongSetting(settings, anySession, "JdbcValidationTimeoutMs", 5000));
+        config.setIdleTimeout(getLongSetting(settings, anySession, "JdbcIdleTimeoutMs", 300000));
+        // Recycle connections well before typical network/SQL Server idle cut-off (default 15 min).
+        config.setMaxLifetime(getLongSetting(settings, anySession, "JdbcMaxLifetimeMs", 900000));
+        // Explicit borrow-time validation so a connection killed while idle is detected and replaced.
+        config.setConnectionTestQuery("SELECT 1");
+        // Warn (do not leak) if a FIX thread holds a connection too long.
+        config.setLeakDetectionThreshold(getLongSetting(settings, anySession, "JdbcLeakDetectionMs", 0));
+        log.info("Using HikariCP DataSource for JDBC store/log (bypasses Proxool) — maxLifetime={}ms, idleTimeout={}ms, connTimeout={}ms, testQuery=SELECT 1",
+                config.getMaxLifetime(), config.getIdleTimeout(), config.getConnectionTimeout());
         return new HikariDataSource(config);
+    }
+
+    /** Reads an optional long setting from [session] then [default]; returns defaultValue if unset/invalid. */
+    private long getLongSetting(SessionSettings settings, SessionID sessionId, String key, long defaultValue) {
+        try {
+            if (sessionId != null && settings.isSetting(sessionId, key)) {
+                return settings.getLong(sessionId, key);
+            }
+            if (settings.isSetting(key)) {
+                return settings.getLong(key);
+            }
+        } catch (Exception ignored) {
+        }
+        return defaultValue;
     }
 
     private SessionID getFirstSessionId(SessionSettings settings) throws ConfigError, FieldConvertError {
@@ -392,6 +421,7 @@ public class Simulator {
         try {
             Iterator<SessionID> it = sessionSettings.sectionIterator();
             int sent = 0;
+            java.util.List<Session> awaitingAck = new java.util.ArrayList<>();
             while (it.hasNext()) {
                 SessionID sessionID = it.next();
                 if (!sendLogoutAtShutdownEffective(sessionID)) {
@@ -404,6 +434,7 @@ public class Simulator {
                         logout.setField(new Text("Simulator shutting down"));
                         Session.sendToTarget(logout, sessionID);
                         sent++;
+                        awaitingAck.add(session);
                         log.info("SendLogout_at_Shutdown=Y: sent Logout to initiator for session {}", sessionID);
                         // Persist N+1 from Logout header (JdbcStore may already read one higher than engine.getNextSenderMsgSeqNum).
                         if (sessionSequenceFromDB != null) {
@@ -421,15 +452,33 @@ public class Simulator {
             }
             if (sent == 0) {
                 log.info("SendLogout_at_Shutdown: no logged-on sessions with Y to send Logout.");
+                return 0;
             }
-            if (sent > 0) {
+            // Graceful: wait for the counterparty to acknowledge Logout (35=5 back) — the session flips to
+            // logged-off — instead of a blind sleep. This completes the FIX Logout handshake before we stop
+            // the acceptor. Capped by ShutdownLogoutWaitMillis so shutdown can't hang if the gateway is gone.
+            long logoutWaitMs = getLongSetting(sessionSettings, null, "ShutdownLogoutWaitMillis", 3000);
+            long deadline = System.currentTimeMillis() + Math.max(0, logoutWaitMs);
+            while (System.currentTimeMillis() < deadline) {
+                boolean anyStillOn = false;
+                for (Session s : awaitingAck) {
+                    if (s.isLoggedOn()) {
+                        anyStillOn = true;
+                        break;
+                    }
+                }
+                if (!anyStillOn) {
+                    log.info("SendLogout_at_Shutdown: all {} session(s) acknowledged Logout (logged off) — graceful handshake complete.", sent);
+                    return sent;
+                }
                 try {
-                    Thread.sleep(1500);
+                    Thread.sleep(50);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    break;
                 }
-                log.info("SendLogout_at_Shutdown: sent Logout to {} session(s), waiting 1.5s before stop.", sent);
             }
+            log.info("SendLogout_at_Shutdown: sent Logout to {} session(s); no Logout ack within {}ms, proceeding to stop.", sent, logoutWaitMs);
             return sent;
         } catch (Exception e) {
             log.warn("SendLogout_at_Shutdown: could not send Logout to sessions: {}", e.getMessage());
@@ -472,11 +521,67 @@ public class Simulator {
         } catch (Exception e) {
             log.debug("Acceptor stop: {}", e.getMessage());
         }
+        // acceptor.stop() returns before per-session dispatcher threads (ThreadPerSessionEventHandlingStrategy)
+        // have finished draining in-flight messages. Closing the JDBC pool while one is still running caused
+        // "Socket closed"/"HikariDataSource has been closed" failures. If that thread was persisting a MsgSeqNum
+        // (JdbcStore.storeSequenceNumbers) it left the number UNPERSISTED -> sequence gaps on the next Logon; if it
+        // was only writing an audit row (JdbcLog.insert) it lost one log line. Wait for those threads to actually
+        // terminate (deterministic) instead of a blind sleep, so nothing writes to the pool after we close it.
+        long quiesceMs = getLongSetting(sessionSettings, null, "ShutdownQuiesceMillis", 2000);
+        awaitEngineDispatcherThreads(quiesceMs);
         if (jdbcDataSource != null && !jdbcDataSource.isClosed()) {
             jdbcDataSource.close();
             log.info("JDBC connection pool closed.");
         }
         log.info("FIX Simulator stopped.");
+    }
+
+    /**
+     * Waits (up to {@code maxWaitMs}) for QuickFIX/J per-session dispatcher threads to finish draining in-flight
+     * messages before the JDBC pool is closed. This is deterministic: once no dispatcher thread is alive, no thread
+     * can write to the pool (sequence store OR audit log), so closing it cannot race a straggler and report
+     * "Socket closed". Returns as soon as the threads are gone (fast clean shutdown), or after the timeout.
+     */
+    private void awaitEngineDispatcherThreads(long maxWaitMs) {
+        if (maxWaitMs <= 0) {
+            return;
+        }
+        long deadline = System.currentTimeMillis() + maxWaitMs;
+        boolean announced = false;
+        while (System.currentTimeMillis() < deadline) {
+            if (!hasLiveEngineDispatcherThread()) {
+                if (announced) {
+                    log.info("QuickFIX/J session dispatcher threads finished; closing JDBC pool.");
+                }
+                return;
+            }
+            if (!announced) {
+                log.info("Waiting up to {}ms for QuickFIX/J session dispatcher threads to drain in-flight messages before closing JDBC pool...", maxWaitMs);
+                announced = true;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        if (hasLiveEngineDispatcherThread()) {
+            log.warn("QuickFIX/J session dispatcher threads still active after {}ms; closing JDBC pool anyway (a late audit-log/seq write may report 'Socket closed'). Increase ShutdownQuiesceMillis if this recurs.", maxWaitMs);
+        }
+    }
+
+    private boolean hasLiveEngineDispatcherThread() {
+        for (Thread t : Thread.getAllStackTraces().keySet()) {
+            if (t == null || !t.isAlive()) {
+                continue;
+            }
+            String name = t.getName();
+            if (name != null && name.startsWith("QF/J Session dispatcher")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static void main(String[] args) throws Exception {
