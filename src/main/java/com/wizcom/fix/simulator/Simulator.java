@@ -132,16 +132,22 @@ public class Simulator {
         }
         WizFixApplication wizFixApplication = new WizFixApplication(settings, configResourceName, lifecycleStore);
         SessionSequenceFromDB sessionSequenceFromDBInstance = null;
+        java.time.ZoneId sessionDateZone = java.time.ZoneId.of("America/New_York");
+        try {
+            SessionID any = getFirstSessionId(settings);
+            if (settings.isSetting(any, "SessionDateZone")) {
+                sessionDateZone = java.time.ZoneId.of(settings.getString(any, "SessionDateZone").trim());
+            }
+        } catch (Exception ignored) { }
+        // FINRA control numbers (tag 1003) unique per control date; shared via DB when JDBC is on.
+        ControlNumberAllocator controlNumberAllocator = new ControlNumberAllocator(jdbcDataSource, sessionDateZone);
+        wizFixApplication.setControlNumberAllocator(controlNumberAllocator);
         if (useJdbcStore && jdbcDataSource != null) {
             String sessionsTable = "TRACE_FIX_SESSIONS";
-            java.time.ZoneId sessionDateZone = java.time.ZoneId.of("America/New_York");
             try {
                 SessionID any = getFirstSessionId(settings);
                 if (settings.isSetting(any, "JdbcStoreSessionsTableName")) {
                     sessionsTable = settings.getString(any, "JdbcStoreSessionsTableName");
-                }
-                if (settings.isSetting(any, "SessionDateZone")) {
-                    sessionDateZone = java.time.ZoneId.of(settings.getString(any, "SessionDateZone").trim());
                 }
             } catch (Exception ignored) { }
             sessionSequenceFromDBInstance = new SessionSequenceFromDB(jdbcDataSource, sessionsTable, sessionDateZone);

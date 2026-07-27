@@ -136,6 +136,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 	/** Optional: on Logon, fetch max sequence from DB and align session (QuickFIX/J 2.3.0 Session API). Set by Simulator when UseJdbcStore=Y. */
 	private volatile SessionSequenceFromDB sessionSequenceFromDB;
+	/** Allocates FINRA TradeID / control numbers (1003) unique per control date (DB-backed when JDBC is on). */
+	private volatile ControlNumberAllocator controlNumberAllocator;
 	/** Last "expecting N" from Logout 58, by session; used on next Logon so we never send lower than N if DB was overwritten. */
 	private final ConcurrentMap<SessionID, Integer> lastExpectedFromUsBySession = new ConcurrentHashMap<>();
 
@@ -148,6 +150,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 	public void setSessionSequenceFromDB(SessionSequenceFromDB sessionSequenceFromDB) {
 		this.sessionSequenceFromDB = sessionSequenceFromDB;
+	}
+
+	public void setControlNumberAllocator(ControlNumberAllocator controlNumberAllocator) {
+		this.controlNumberAllocator = controlNumberAllocator;
 	}
 
 	private static int getNextSenderMsgSeqNumFromSession(Session session) {
@@ -2803,6 +2809,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	}
 
 	private String getControlDate() {
+		ControlNumberAllocator alloc = controlNumberAllocator;
+		if (alloc != null) {
+			return alloc.todayControlDate();
+		}
 		SimpleDateFormat f = new SimpleDateFormat("yyyyMMdd");
 		return f.format(new Date());
 	}
@@ -2811,6 +2821,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		return Long.valueOf(System.currentTimeMillis() + (nextID++)).toString().substring(0, 9);
 	}*/
 	
+	/**
+	 * FINRA TradeID / control number (tag 1003). Unique per control date (and product prefix 1=SP, 2=CA, 7=TS).
+	 * Persisted via {@link ControlNumberAllocator} when JDBC is available so restarts do not reuse numbers.
+	 */
 	private String getFinraControlNo(String secType) {
 		String s = secType != null ? secType.trim().toUpperCase() : "";
 		String prefix;
@@ -2823,7 +2837,12 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		} else {
 			prefix = "1";
 		}
-		return prefix + String.format("%09d", nextID++ % 1000000000L);
+		ControlNumberAllocator alloc = controlNumberAllocator;
+		if (alloc != null) {
+			return alloc.allocate(getControlDate(), prefix);
+		}
+		// No allocator wired (should not happen in normal Simulator startup): keep advancing nextID but this is not day-unique across restarts.
+		return prefix + String.format("%09d", Math.floorMod(nextID++, 1_000_000_000));
 	}
 		 
 	private static class TradeRptStatus extends IntField {

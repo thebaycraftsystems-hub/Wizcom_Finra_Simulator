@@ -103,3 +103,14 @@ IF NOT EXISTS (SELECT * FROM sys.triggers WHERE name = 'tr_TRACE_FIX_MESSAGES_LO
   EXEC('CREATE TRIGGER dbo.tr_TRACE_FIX_MESSAGES_LOG_parse_fix ON dbo.TRACE_FIX_MESSAGES_LOG AFTER INSERT AS SET NOCOUNT ON; UPDATE m SET m.MessageTypeTag = ISNULL(LEFT(parsed.MsgTypeTag, 3), ''''''), m.MessageType = parsed.MsgTypeName, m.TraceTradeReportID = parsed.TradeRptID, m.msgseqnum = parsed.MsgSeqNum FROM dbo.TRACE_FIX_MESSAGES_LOG m INNER JOIN inserted i ON m.id = i.id CROSS APPLY (SELECT t.tag35 AS MsgTypeTag, CASE t.tag35 WHEN ''AE'' THEN ''Trade Report'' WHEN ''0'' THEN ''Heartbeat'' WHEN ''A'' THEN ''Logon'' WHEN ''5'' THEN ''Logout'' WHEN ''1'' THEN ''Test Request'' WHEN ''2'' THEN ''Resend Request'' WHEN ''3'' THEN ''Reject'' WHEN ''4'' THEN ''Sequence Reset'' ELSE NULL END AS MsgTypeName, CASE WHEN CHARINDEX(''571='', i.text) > 0 THEN LTRIM(RTRIM(REPLACE(REPLACE(SUBSTRING(i.text, CHARINDEX(''571='', i.text) + 4, ISNULL(NULLIF(CHARINDEX(CHAR(1), i.text, CHARINDEX(''571='', i.text) + 4), 0) - (CHARINDEX(''571='', i.text) + 4), 20)), CHAR(1), ''''''), CHAR(2), '''''')) ELSE NULL END AS TradeRptID, CASE WHEN CHARINDEX(''34='', i.text) > 0 THEN ISNULL(TRY_CAST(LTRIM(RTRIM(REPLACE(REPLACE(SUBSTRING(i.text, CHARINDEX(''34='', i.text) + 3, CASE WHEN CHARINDEX(CHAR(1), i.text, CHARINDEX(''34='', i.text) + 3) > 0 THEN CHARINDEX(CHAR(1), i.text, CHARINDEX(''34='', i.text) + 3) - (CHARINDEX(''34='', i.text) + 3) ELSE 20 END), CHAR(1), ''''''), CHAR(2), '''''')) AS INT), 0) ELSE 0 END AS MsgSeqNum FROM (SELECT CASE WHEN CHARINDEX(''35='', i.text) > 0 THEN LTRIM(RTRIM(REPLACE(REPLACE(SUBSTRING(i.text, CHARINDEX(''35='', i.text) + 3, CASE WHEN CHARINDEX(CHAR(1), i.text, CHARINDEX(''35='', i.text) + 3) > 0 THEN CHARINDEX(CHAR(1), i.text, CHARINDEX(''35='', i.text) + 3) - (CHARINDEX(''35='', i.text) + 3) ELSE 20 END), CHAR(1), ''''''), CHAR(2), '''''')) ELSE '''''' END AS tag35) t) parsed;');
 IF NOT EXISTS (SELECT * FROM sys.triggers WHERE name = 'tr_TRACE_FIX_EVENT_LOG_set_simulator')
   EXEC('CREATE TRIGGER dbo.tr_TRACE_FIX_EVENT_LOG_set_simulator ON dbo.TRACE_FIX_EVENT_LOG AFTER INSERT AS BEGIN SET NOCOUNT ON; UPDATE e SET e.simulator_instance = x.program_name FROM dbo.TRACE_FIX_EVENT_LOG e INNER JOIN inserted i ON e.id = i.id CROSS APPLY (SELECT program_name FROM sys.dm_exec_sessions WHERE session_id = @@SPID) x; END');
+
+-- FINRA TradeID / control number allocator (tag 1003) — unique per control_date + product_prefix (1=SP, 2=CA, 7=TS).
+-- Simulator also auto-creates this table on startup if missing.
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'TRACE_FIX_CONTROL_NUMBERS')
+CREATE TABLE dbo.TRACE_FIX_CONTROL_NUMBERS (
+  control_date    CHAR(8) NOT NULL,
+  product_prefix  CHAR(1) NOT NULL,
+  next_value      INT NOT NULL,
+  PRIMARY KEY (control_date, product_prefix)
+);
+GO
