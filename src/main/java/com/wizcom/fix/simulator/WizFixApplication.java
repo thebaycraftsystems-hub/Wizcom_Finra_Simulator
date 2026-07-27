@@ -133,6 +133,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	private final boolean isLogoutRequiredAtSessionTimeoutFromConfig;
 	private volatile ScheduledExecutorService sessionTimeoutScheduler;
 	private final ConcurrentMap<SessionID, ScheduledFuture<?>> sessionTimeoutTasks = new ConcurrentHashMap<>();
+	/** Schedules delayed AE responses off the QF/J session dispatcher so heartbeats keep flowing during ResponseMsgDelay. */
+	private volatile ScheduledExecutorService responseDelayScheduler;
 
 	/** Optional: on Logon, fetch max sequence from DB and align session (QuickFIX/J 2.3.0 Session API). Set by Simulator when UseJdbcStore=Y. */
 	private volatile SessionSequenceFromDB sessionSequenceFromDB;
@@ -1143,6 +1145,22 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		return isLogoutRequiredAtSessionTimeoutFromConfig;
 	}
 
+	private ScheduledExecutorService getOrCreateResponseDelayScheduler() {
+		if (responseDelayScheduler != null) {
+			return responseDelayScheduler;
+		}
+		synchronized (this) {
+			if (responseDelayScheduler == null) {
+				responseDelayScheduler = Executors.newScheduledThreadPool(4, r -> {
+					Thread t = new Thread(r, "ResponseMsgDelay-" + simulatorRoleFromConfig);
+					t.setDaemon(true);
+					return t;
+				});
+			}
+			return responseDelayScheduler;
+		}
+	}
+
 	private ScheduledExecutorService getOrCreateSessionTimeoutScheduler() {
 		if (sessionTimeoutScheduler != null) return sessionTimeoutScheduler;
 		synchronized (this) {
@@ -1350,20 +1368,39 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			
 	// TradeReportTransType : 0=new, 1=cancel, 2=Replace, ----------IN
 	public void onMessage(TradeCaptureReport msg, SessionID sessionID) throws FieldNotFound, SessionNotFound, ConfigError, FieldConvertError, InterruptedException {
-		
+
 		int delaySecs = responseMsgDelayTimeEffective(sessionID);
 		if (responseMsgDelayEffective(sessionID) && delaySecs > 0) {
-			System.out.println();
-			System.out.println("Response processing delay time is :: " + delaySecs);
-			try {
-				Thread.sleep(delaySecs * 1000L);
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
+			// IMPORTANT: do NOT Thread.sleep on the QF/J session dispatcher. Sleeping here blocks heartbeats
+			// for HeartBtInt*~2 (~60s with HB=30) and the gateway disconnects before ResponseMsgDelayTime
+			// (120–150s) finishes — so no AE is ever sent. Schedule the response on a side thread instead.
+			log.info("ResponseMsgDelay=Y: AE response for {} scheduled in {}s (session dispatcher free for heartbeats)",
+					sessionID, delaySecs);
+			int timeoutSecs = sessionTimeoutSecondsEffective(sessionID);
+			if (sessionTimeoutRequiredEffective(sessionID) && timeoutSecs > 0 && timeoutSecs < delaySecs
+					&& isLogoutRequiredAtSessionTimeoutEffective(sessionID)) {
+				log.warn("ResponseMsgDelayTime={}s > SessionTimeoutSeconds={}s with Logout on timeout — session may Logout before delayed AE is sent. Raise SessionTimeoutSeconds or set isLogoutRequiredatSessionTimeout=False.",
+						delaySecs, timeoutSecs);
 			}
-			onMessageHold(msg, sessionID);
-		} else {
-			onMessageHold(msg, sessionID);
+			final TradeCaptureReport delayedMsg = msg;
+			final SessionID delayedSid = sessionID;
+			getOrCreateResponseDelayScheduler().schedule(() -> {
+				try {
+					Session s = Session.lookupSession(delayedSid);
+					if (s == null || !s.isLoggedOn()) {
+						log.warn("ResponseMsgDelay: session {} not logged on after {}s — dropping delayed AE response",
+								delayedSid, delaySecs);
+						return;
+					}
+					log.info("ResponseMsgDelay: {}s elapsed — sending AE response for {}", delaySecs, delayedSid);
+					onMessageHold(delayedMsg, delayedSid);
+				} catch (Exception e) {
+					log.error("ResponseMsgDelay: failed delayed AE for {}: {}", delayedSid, e.getMessage(), e);
+				}
+			}, delaySecs, TimeUnit.SECONDS);
+			return;
 		}
+		onMessageHold(msg, sessionID);
 	}
 	
 	public synchronized void onMessageHold(TradeCaptureReport msg, SessionID sessionID) throws FieldNotFound, SessionNotFound, ConfigError, FieldConvertError {
