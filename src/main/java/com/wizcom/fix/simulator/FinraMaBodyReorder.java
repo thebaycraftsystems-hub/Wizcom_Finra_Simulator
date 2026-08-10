@@ -14,20 +14,36 @@ import quickfix.fix44.component.Instrument;
 
 /**
  * FINRA Corporates & Agencies / SP §5.1.11 (CAMA/SPMA) outbound AE body order.
- * Only tags listed in the Match Status spec table are wired; no leftover append.
+ * Wire order matches FINRA Real-time SPMA: MatchControlDate/MatchTradeID (22027/22028)
+ * appear <b>after</b> NoSecurityAltID (454/455/456) and <b>before</b> NoSides (552).
  */
 public final class FinraMaBodyReorder {
 
 	private static final Logger log = LoggerFactory.getLogger(FinraMaBodyReorder.class);
 
-	/** §5.1.11 — identifiers and match metadata before Instrument. */
-	private static final int[] PRE_MA = {
-		1011, 571, 22011, 1003, 22027, 22028, 487, 856, 573, 570, 64
+	/**
+	 * FINRA RT observed body order for SPMA (root delimiters only; 455/456 live inside group 454).
+	 * Example: {@code ...1011|22011|454=1|455|456|22027|22028|552=2...}
+	 */
+	private static final int[] FINRA_MA_WIRE_ORDER = {
+		22, 31, 32, 48, 60, 64, 75,
+		487, 570, 571, 573, 856, 1003, 1011, 22011,
+		454,
+		22027, 22028,
+		552,
+		797
 	};
 
-	private static final int[] QTY_BLOCK = { 32, 31, 75, 60 };
+	/** Scalars before Instrument / NoSecurityAltID group. */
+	private static final int[] PRE_INSTRUMENT = {
+		22, 31, 32, 48, 60, 64, 75,
+		487, 570, 571, 573, 856, 1003, 1011, 22011
+	};
 
-	/** §5.1.11 — optional CopyMsgIndicator after NoSides (omit if not set). */
+	/** Match IDs after SecurityAltID group (FINRA RT). */
+	private static final int[] POST_INSTRUMENT_MATCH = { 22027, 22028 };
+
+	/** Optional CopyMsgIndicator after NoSides. */
 	private static final int[] POST_MA = { 797 };
 
 	private FinraMaBodyReorder() {
@@ -74,16 +90,19 @@ public final class FinraMaBodyReorder {
 			}
 			FinraAeBodyReorderUtil.clearNoSides(msg);
 
+			// Empty body: install FINRA field order, then re-add so QF/J emits 22027/22028 after 454.
+			FinraAeBodyReorderUtil.applyBodyFieldOrder(msg, FINRA_MA_WIRE_ORDER);
+
 			Map<Integer, String> captured = new LinkedHashMap<>(full);
 			for (int t : new int[] { 48, 22, 454, 455, 456 }) {
 				captured.remove(t);
 			}
 
-			FinraAeBodyReorderUtil.applyOrderedTags(msg, PRE_MA, captured);
+			FinraAeBodyReorderUtil.applyOrderedTags(msg, PRE_INSTRUMENT, captured);
 			if (hasInstrument) {
 				msg.set(inst);
 			}
-			FinraAeBodyReorderUtil.applyOrderedTags(msg, QTY_BLOCK, captured);
+			FinraAeBodyReorderUtil.applyOrderedTags(msg, POST_INSTRUMENT_MATCH, captured);
 
 			for (TradeCaptureReport.NoSides side : sides) {
 				msg.addGroup(side);
@@ -91,7 +110,6 @@ public final class FinraMaBodyReorder {
 
 			FinraAeBodyReorderUtil.applyOrderedTags(msg, POST_MA, captured);
 			FinraAeBodyReorderUtil.finalizeMaNoSidesCount(msg);
-			// §5.1.11: do not append tags outside the spec table
 		} catch (Exception e) {
 			log.warn("FinraMaBodyReorder: {}", e.getMessage());
 		}

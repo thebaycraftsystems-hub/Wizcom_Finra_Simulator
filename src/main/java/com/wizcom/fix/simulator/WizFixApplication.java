@@ -29,6 +29,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 
 import org.quickfixj.jmx.mbean.session.SessionAdmin;
@@ -135,6 +136,14 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	private final ConcurrentMap<SessionID, ScheduledFuture<?>> sessionTimeoutTasks = new ConcurrentHashMap<>();
 	/** Schedules delayed AE responses off the QF/J session dispatcher so heartbeats keep flowing during ResponseMsgDelay. */
 	private volatile ScheduledExecutorService responseDelayScheduler;
+	/** Bumped on logout/disconnect so in-flight ResponseMsgDelay tasks never send AE on a dead/replaced session. */
+	private final ConcurrentMap<SessionID, AtomicLong> sessionEpoch = new ConcurrentHashMap<>();
+	/** Pending ResponseMsgDelay futures per session — cancelled on logout so continuous delayed AEs stop when gateway drops. */
+	private final ConcurrentMap<SessionID, ConcurrentLinkedQueue<ScheduledFuture<?>>> pendingDelayedResponses = new ConcurrentHashMap<>();
+	/** Last inbound admin/app activity (ms); used to force-disconnect zombie sessions so reconnect Logon is accepted. */
+	private final ConcurrentMap<SessionID, Long> lastInboundMs = new ConcurrentHashMap<>();
+	/** If no inbound for this many ms while still "logged on", disconnect so gateway's next Logon is not rejected as duplicate. */
+	private static final long STALE_INBOUND_DISCONNECT_MS = 90_000L;
 
 	/** Optional: on Logon, fetch max sequence from DB and align session (QuickFIX/J 2.3.0 Session API). Set by Simulator when UseJdbcStore=Y. */
 	private volatile SessionSequenceFromDB sessionSequenceFromDB;
@@ -408,10 +417,13 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	public void onCreate(SessionID arg0) {
 		clearLogonDelayState(arg0);
 		pendingHeartbeatResponseSessions.remove(arg0);
+		bumpSessionEpoch(arg0);
+		lastInboundMs.put(arg0, System.currentTimeMillis());
 	}
 
 	public void onLogon(SessionID arg0) {
 		clearLogonDelayState(arg0);
+		lastInboundMs.put(arg0, System.currentTimeMillis());
 		scheduleSessionWallClockTimeout(arg0);
 	}
 
@@ -420,6 +432,63 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		clearLogonDelayState(arg0);
 		pendingHeartbeatResponseSessions.remove(arg0);
 		heartbeatDelayAppMessageQueue.remove(arg0);
+		// Stop Delayed AE flood + free session for gateway reconnect Logon (QFJ rejects new Logon while still logged on).
+		cancelPendingDelayedResponses(arg0, "onLogout");
+		bumpSessionEpoch(arg0);
+		lastInboundMs.remove(arg0);
+	}
+
+	private void bumpSessionEpoch(SessionID sid) {
+		if (sid == null) {
+			return;
+		}
+		sessionEpoch.computeIfAbsent(sid, k -> new AtomicLong(0)).incrementAndGet();
+	}
+
+	private long currentSessionEpoch(SessionID sid) {
+		return sessionEpoch.computeIfAbsent(sid, k -> new AtomicLong(0)).get();
+	}
+
+	private void cancelPendingDelayedResponses(SessionID sid, String reason) {
+		if (sid == null) {
+			return;
+		}
+		ConcurrentLinkedQueue<ScheduledFuture<?>> q = pendingDelayedResponses.remove(sid);
+		if (q == null || q.isEmpty()) {
+			return;
+		}
+		int n = 0;
+		ScheduledFuture<?> f;
+		while ((f = q.poll()) != null) {
+			if (f.cancel(false)) {
+				n++;
+			}
+		}
+		if (n > 0) {
+			log.info("Cancelled {} pending ResponseMsgDelay AE task(s) for {} ({})", n, sid, reason);
+		}
+	}
+
+	/** Force-disconnect a zombie logged-on session so the gateway's next Logon is accepted (not closed as duplicate). */
+	private void disconnectStaleSessionIfNeeded(SessionID sid, String reason) {
+		Session s = Session.lookupSession(sid);
+		if (s == null || !s.isLoggedOn()) {
+			return;
+		}
+		Long last = lastInboundMs.get(sid);
+		long idleMs = (last == null) ? Long.MAX_VALUE : (System.currentTimeMillis() - last);
+		if (idleMs < STALE_INBOUND_DISCONNECT_MS) {
+			return;
+		}
+		log.warn("Disconnecting stale session {} (no inbound for {}ms) — {} so gateway reconnect Logon can succeed",
+				sid, idleMs == Long.MAX_VALUE ? "unknown" : idleMs, reason);
+		cancelPendingDelayedResponses(sid, "stale-disconnect");
+		bumpSessionEpoch(sid);
+		try {
+			s.disconnect("Stale session: no inbound from initiator (" + reason + ")", false);
+		} catch (Exception e) {
+			log.warn("Failed to disconnect stale session {}: {}", sid, e.getMessage());
+		}
 	}
 
 	/** Clear LogonDelay pending state for this session (handles SessionID field-order mismatches). */
@@ -492,6 +561,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	}
 		
 	public void fromAdmin(Message arg0, SessionID arg1) throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, RejectLogon {
+		lastInboundMs.put(arg1, System.currentTimeMillis());
 		String msgType = null;
 		try { msgType = arg0.getHeader().getField(new MsgType()).getValue(); } catch (FieldNotFound ignored) { }
 
@@ -1156,6 +1226,16 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 					t.setDaemon(true);
 					return t;
 				});
+				// Periodically free zombie sessions so gateway reconnect Logon is not rejected as "already logged on".
+				responseDelayScheduler.scheduleAtFixedRate(() -> {
+					try {
+						for (SessionID sid : new java.util.ArrayList<>(lastInboundMs.keySet())) {
+							disconnectStaleSessionIfNeeded(sid, "watchdog");
+						}
+					} catch (Exception e) {
+						log.debug("Stale-session watchdog: {}", e.getMessage());
+					}
+				}, 30, 30, TimeUnit.SECONDS);
 			}
 			return responseDelayScheduler;
 		}
@@ -1250,6 +1330,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	}
 
 	public void fromApp(Message arg0, SessionID arg1) throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, UnsupportedMessageType {
+		lastInboundMs.put(arg1, System.currentTimeMillis());
 		if (pendingLogonResponseSessions.contains(arg1)) {
 			log.info("Ignoring app message until we send Logon back to initiator: [ {} ]", arg0.toString());
 			return;
@@ -1384,8 +1465,14 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			}
 			final TradeCaptureReport delayedMsg = msg;
 			final SessionID delayedSid = sessionID;
-			getOrCreateResponseDelayScheduler().schedule(() -> {
+			final long epochAtSchedule = currentSessionEpoch(sessionID);
+			ScheduledFuture<?> future = getOrCreateResponseDelayScheduler().schedule(() -> {
 				try {
+					if (currentSessionEpoch(delayedSid) != epochAtSchedule) {
+						log.info("ResponseMsgDelay: session {} epoch changed (logout/reconnect) — dropping delayed AE", delayedSid);
+						return;
+					}
+					disconnectStaleSessionIfNeeded(delayedSid, "before delayed AE send");
 					Session s = Session.lookupSession(delayedSid);
 					if (s == null || !s.isLoggedOn()) {
 						log.warn("ResponseMsgDelay: session {} not logged on after {}s — dropping delayed AE response",
@@ -1398,6 +1485,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 					log.error("ResponseMsgDelay: failed delayed AE for {}: {}", delayedSid, e.getMessage(), e);
 				}
 			}, delaySecs, TimeUnit.SECONDS);
+			pendingDelayedResponses.computeIfAbsent(sessionID, k -> new ConcurrentLinkedQueue<>()).add(future);
 			return;
 		}
 		onMessageHold(msg, sessionID);
@@ -2051,11 +2139,15 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		} else {
 			ma.setField(new StringField(22011, getControlDate()));
 		}
+		String tradeIdOnWire = null;
 		if (ctx.tradeId != null && !ctx.tradeId.trim().isEmpty()) {
-			ma.setField(new StringField(1003, ctx.tradeId.trim()));
+			tradeIdOnWire = ctx.tradeId.trim();
+			ma.setField(new StringField(1003, tradeIdOnWire));
 		}
 		ma.setField(new StringField(22027, getControlDate()));
-		ma.setField(new StringField(22028, matchTradeId));
+		// FINRA RT SPMA: MatchTradeID (22028) equals TradeID (1003) when TradeID is present.
+		ma.setField(new StringField(22028,
+				tradeIdOnWire != null ? tradeIdOnWire : matchTradeId));
 		ma.setField(new TradeReportTransType(3));
 		ma.setField(new IntField(856, 2));
 		ma.setField(new MatchStatus(matched ? '0' : '1'));
@@ -2070,7 +2162,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		log.info("Sent Match Status {} for product {} (573={}).", product + "MA", product, matched ? "0" : "1");
 
 		if (matched) {
-			matchStatusContextStore.markMatched(ctx.clientTradeReportId, matchTradeId);
+			String persistedMatchId = tradeIdOnWire != null ? tradeIdOnWire : matchTradeId;
+			matchStatusContextStore.markMatched(ctx.clientTradeReportId, persistedMatchId);
 			try {
 				compliancePipeline.getLifecycleEngine().markMatched(ctx.clientTradeReportId, sessionID);
 			} catch (Exception e) {
@@ -2107,13 +2200,52 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 				return;
 			}
 			securityId = securityId.trim();
+
+			String idSource = null;
+			try {
+				if (inbound.isSetField(22)) {
+					idSource = inbound.getField(new StringField(22)).getValue();
+				}
+			} catch (Exception ignored) {
+			}
+			boolean gatewaySentSymbol = idSource != null
+					&& (FinraSecurityIDSource.SYMBOL.equals(idSource.trim())
+							|| SecurityIDSource.EXCHANGE_SYMBOL.equals(idSource.trim()));
+
+			// Gateway Symbol (22=8) → MA CUSIP 48=MATCH-CUS; Gateway CUSIP (22=1) → echo same 48.
+			String cusipOnWire = gatewaySentSymbol ? "MATCH-CUS" : securityId;
+
+			String altId = null;
+			try {
+				if (inbound.isSetField(455)) {
+					String inboundAlt = inbound.getField(new StringField(455)).getValue();
+					if (inboundAlt != null && !inboundAlt.trim().isEmpty()) {
+						altId = inboundAlt.trim();
+					}
+				} else if (inbound.isSetField(454)) {
+					TradeCaptureReport.NoSecurityAltID altGrp = new TradeCaptureReport.NoSecurityAltID();
+					inbound.getGroup(1, altGrp);
+					if (altGrp.isSetField(455)) {
+						String inboundAlt = altGrp.getField(new StringField(455)).getValue();
+						if (inboundAlt != null && !inboundAlt.trim().isEmpty()) {
+							altId = inboundAlt.trim();
+						}
+					}
+				}
+			} catch (Exception ignored) {
+			}
+			if (altId == null || altId.isEmpty()) {
+				// Symbol was reported in 48, or no alt present — keep symbol value on 455.
+				altId = securityId;
+			}
+
 			Instrument outInst = new Instrument();
-			outInst.set(new SecurityID(securityId));
+			outInst.set(new SecurityID(cusipOnWire));
 			outInst.set(new SecurityIDSource(SecurityIDSource.CUSIP));
 			outInst.set(new NoSecurityAltID(1));
 			TradeCaptureReport.NoSecurityAltID alt = new TradeCaptureReport.NoSecurityAltID();
 			alt.set(new SecurityAltIDSource(FinraSecurityIDSource.SYMBOL));
-			alt.set(new SecurityAltID(securityId));
+			alt.set(new SecurityAltID(altId));
 			outInst.addGroup(alt);
 			ma.set(outInst);
 		} catch (Exception e) {

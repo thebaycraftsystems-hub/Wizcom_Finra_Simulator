@@ -1,5 +1,6 @@
 package com.wizcom.fix.simulator;
 
+import java.lang.reflect.Field;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -7,6 +8,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import quickfix.FieldMap;
 import quickfix.FieldNotFound;
 import quickfix.Message;
 import quickfix.StringField;
@@ -101,6 +103,93 @@ public final class FinraAeBodyReorderUtil {
 				}
 			}
 		}
+	}
+
+	/**
+	 * Installs body {@code fieldOrder} and replaces the internal fields {@link java.util.TreeMap}
+	 * with one that uses that order. Required because QuickFIX/J only attaches
+	 * {@code FieldOrderComparator} when {@code fieldOrder} is set in the {@link FieldMap} constructor;
+	 * mutating {@code fieldOrder} later has no effect on a naturally ordered TreeMap.
+	 * Call on an empty (or about-to-be-refilled) body.
+	 */
+	public static void applyBodyFieldOrder(FieldMap msg, int[] order) {
+		if (msg == null || order == null || order.length == 0) {
+			return;
+		}
+		final int[] copy = order.clone();
+		try {
+			Object unsafe = theUnsafe();
+			Field orderField = FieldMap.class.getDeclaredField("fieldOrder");
+			Field fieldsField = FieldMap.class.getDeclaredField("fields");
+			long orderOffset = objectFieldOffset(unsafe, orderField);
+			long fieldsOffset = objectFieldOffset(unsafe, fieldsField);
+
+			@SuppressWarnings("unchecked")
+			java.util.TreeMap<Integer, ?> oldFields =
+					(java.util.TreeMap<Integer, ?>) getObject(unsafe, msg, fieldsOffset);
+
+			java.util.Comparator<Integer> cmp = fieldOrderComparator(copy);
+			java.util.TreeMap<Integer, Object> rebuilt = new java.util.TreeMap<>(cmp);
+			if (oldFields != null) {
+				for (java.util.Map.Entry<Integer, ?> e : oldFields.entrySet()) {
+					rebuilt.put(e.getKey(), e.getValue());
+				}
+			}
+
+			putObject(unsafe, msg, orderOffset, copy);
+			putObject(unsafe, msg, fieldsOffset, rebuilt);
+		} catch (Exception e) {
+			log.warn("applyBodyFieldOrder: {}", e.getMessage());
+		}
+	}
+
+	private static java.util.Comparator<Integer> fieldOrderComparator(final int[] order) {
+		return (a, b) -> {
+			int ra = indexOfTag(a.intValue(), order);
+			int rb = indexOfTag(b.intValue(), order);
+			boolean aOrdered = ra >= 0;
+			boolean bOrdered = rb >= 0;
+			if (aOrdered || bOrdered) {
+				if (!aOrdered) {
+					ra = Integer.MAX_VALUE;
+				}
+				if (!bOrdered) {
+					rb = Integer.MAX_VALUE;
+				}
+				return ra - rb;
+			}
+			return a.intValue() - b.intValue();
+		};
+	}
+
+	private static int indexOfTag(int tag, int[] order) {
+		for (int i = 0; i < order.length; i++) {
+			if (order[i] == tag) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	private static Object theUnsafe() throws Exception {
+		Field f = Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
+		f.setAccessible(true);
+		return f.get(null);
+	}
+
+	private static long objectFieldOffset(Object unsafe, Field f) throws Exception {
+		return ((Number) unsafe.getClass().getMethod("objectFieldOffset", Field.class)
+				.invoke(unsafe, f)).longValue();
+	}
+
+	private static Object getObject(Object unsafe, Object target, long offset) throws Exception {
+		return unsafe.getClass().getMethod("getObject", Object.class, long.class)
+				.invoke(unsafe, target, offset);
+	}
+
+	private static void putObject(Object unsafe, Object target, long offset, Object value) throws Exception {
+		unsafe.getClass().getMethod("putObject", Object.class, long.class, Object.class)
+				.invoke(unsafe, target, offset, value);
 	}
 
 	/** NoSides groups that have Side (54) set — matches what JPMS counts on the wire. */
