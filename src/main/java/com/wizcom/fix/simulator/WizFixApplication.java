@@ -126,6 +126,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	private final int matchStatusAckDelaySecsFromConfig;
 
 	private final MatchStatusContextStore matchStatusContextStore = new MatchStatusContextStore();
+	/** Secondary only: JPMS and JPMB reports stay open until the opposite side compares. */
+	private final TwoPartyMatchBook twoPartyMatchBook = new TwoPartyMatchBook();
 
 	/** Wall-clock session timeout: after successful Logon, optional timer per SessionID (ignores traffic). Parsed with Boolean.parseBoolean (True/False). */
 	private final boolean sessionTimeoutRequiredFromConfig;
@@ -357,6 +359,9 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		String logonSecsLine = simulatorRoleFromConfig + " LogonDelayinSecs from config = "
 				+ (logonDelayFromConfig ? String.valueOf(logonDelaySecsFromConfig) : logonDelaySecsFromConfig + " (ignored, LogonDelay=N)");
 		log.info(logonSecsLine);
+		if (twoPartyMatchEnabled()) {
+			log.info("Secondary two-gateway match: JPMS and JPMB dealer reports are compared, and SPMA/CAMA/TSMA is sent to both sessions.");
+		}
 		System.out.println(logonSecsLine);
 		if (configResourceName != null) {
 			dumpConfigToConsoleAndLog(configResourceName);
@@ -1816,6 +1821,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 	// NEW
 	private void processingTradeEntry(TradeCaptureReport reqTrdCapRpt, SessionID sessionID, String securityType) {
+		TradeCaptureReport inboundSnapshot = snapshotInboundForMatch(reqTrdCapRpt);
 
 		TradeCaptureReport resTrdCapRpt = new TradeCaptureReport();
 
@@ -1862,7 +1868,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			compliancePipeline.getLifecycleEngine().markAccepted(resTrdCapRpt.getTradeReportID().getValue(), sessionID);
 			String productEn = normalizeProductPrefix(securityType);
 			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productEn);
-			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productEn, resTrdCapRpt, MatchStatusEvent.MATCHED);
+			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productEn, resTrdCapRpt, MatchStatusEvent.MATCHED, inboundSnapshot);
 
 			if(777 == reqTrdCapRpt.getLastPx().getValue()) {
 				log.info("*****    Processing NEW ALLEGE request....");				
@@ -1878,6 +1884,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		
 	// MODIFICATION
 	private void processingTradeCorrection(TradeCaptureReport reqTrdCapRpt, SessionID sessionID, String securityType) {
+		TradeCaptureReport inboundSnapshot = snapshotInboundForMatch(reqTrdCapRpt);
 		TradeCaptureReport resTrdCapRpt = new TradeCaptureReport();
 
 		try {
@@ -1926,7 +1933,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			String productCr = normalizeProductPrefix(securityType);
 			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productCr);
-			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productCr, resTrdCapRpt, MatchStatusEvent.MATCHED);
+			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productCr, resTrdCapRpt, MatchStatusEvent.MATCHED, inboundSnapshot);
 			
 			if(777 == reqTrdCapRpt.getLastPx().getValue()) {
 				log.info("Processing ALLEGE for Trade Correction....");
@@ -1944,6 +1951,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 	// CANCEL
 	private void processingTradeCancel(TradeCaptureReport reqTrdCapRpt, SessionID sessionID, String securityType)
 			throws FieldNotFound, SessionNotFound {
+		TradeCaptureReport inboundSnapshot = snapshotInboundForMatch(reqTrdCapRpt);
 		TradeCaptureReport resTrdCapRpt = new TradeCaptureReport();
 
 		try {
@@ -1993,7 +2001,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			String productCx = normalizeProductPrefix(securityType);
 			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productCx);
-			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productCx, resTrdCapRpt, MatchStatusEvent.UNMATCHED);
+			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productCx, resTrdCapRpt, MatchStatusEvent.UNMATCHED, inboundSnapshot);
 						
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
@@ -2005,6 +2013,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 
 	//Historic
 	private void processingTradeReversal(TradeCaptureReport reqTrdCapRpt, SessionID sessionID, String securityType) {
+		TradeCaptureReport inboundSnapshot = snapshotInboundForMatch(reqTrdCapRpt);
 		TradeCaptureReport resTrdCapRpt = new TradeCaptureReport();
 
 		try {
@@ -2053,7 +2062,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			Session.sendToTarget(resTrdCapRpt, sessionID);
 			String productHx = normalizeProductPrefix(securityType);
 			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productHx);
-			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productHx, resTrdCapRpt, MatchStatusEvent.UNMATCHED);
+			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productHx, resTrdCapRpt, MatchStatusEvent.UNMATCHED, inboundSnapshot);
 		} catch (SessionNotFound sessionNotFound) {
 			sessionNotFound.printStackTrace();
 			log.error("Error ::",sessionNotFound);
@@ -2084,9 +2093,30 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		return s.length() >= 2 ? s.substring(0, 2) : s;
 	}
 
-	private void maybeSendMatchStatusAck(TradeCaptureReport req, SessionID sessionID, String productPrefix,
-			TradeCaptureReport ackMsg, MatchStatusEvent event) {
+	private boolean twoPartyMatchEnabled() {
+		return simulatorRoleFromConfig != null && "Secondary".equalsIgnoreCase(simulatorRoleFromConfig);
+	}
+
+	/** Clone before the ack path rewrites NoSides. Null on primary, where one-gateway match is unchanged. */
+	private TradeCaptureReport snapshotInboundForMatch(TradeCaptureReport req) {
+		if (!twoPartyMatchEnabled() || req == null) {
+			return null;
+		}
 		try {
+			return (TradeCaptureReport) req.clone();
+		} catch (Exception e) {
+			log.warn("Two-party match: inbound snapshot failed: {}", e.getMessage());
+			return null;
+		}
+	}
+
+	private void maybeSendMatchStatusAck(TradeCaptureReport req, SessionID sessionID, String productPrefix,
+			TradeCaptureReport ackMsg, MatchStatusEvent event, TradeCaptureReport inboundSnapshot) {
+		try {
+			if (twoPartyMatchEnabled()) {
+				handleTwoPartyMatch(inboundSnapshot != null ? inboundSnapshot : req, sessionID, productPrefix, ackMsg, event);
+				return;
+			}
 			if (!sendMatchStatusAckEffective(sessionID)) {
 				return;
 			}
@@ -2111,6 +2141,167 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			Thread.currentThread().interrupt();
 		} catch (Exception e) {
 			log.warn("maybeSendMatchStatusAck: {}", e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * Secondary only. A dealer entry stays open until the other gateway sends the opposite side
+	 * (JPMS contra JPMB, or JPMB contra JPMS). One Match Status then goes to both sessions.
+	 */
+	private void handleTwoPartyMatch(TradeCaptureReport inbound, SessionID sessionID, String productPrefix,
+			TradeCaptureReport ackMsg, MatchStatusEvent event) throws InterruptedException {
+		if (inbound == null) {
+			return;
+		}
+		String product = productPrefix != null ? productPrefix : "CA";
+		boolean correction = isCorrection(inbound);
+		if (event == MatchStatusEvent.UNMATCHED) {
+			releasePriorTrade(inbound, sessionID, product);
+			return;
+		}
+		if (!DealerTradeMatchEligibility.isEligibleForMatchStatus(inbound)) {
+			log.debug("Two-party match skipped: customer, affiliate, or locked-in trade.");
+			return;
+		}
+		if (correction) {
+			releasePriorTrade(inbound, sessionID, product);
+		}
+		if (isForceUnmatchedPrice(inbound)) {
+			log.info("Two-party match: LastPx 888 — trade left unmatched.");
+			return;
+		}
+		String finraTradeId = stringField(ackMsg, 1003);
+		String controlDate = stringField(ackMsg, 22011);
+		TwoPartyMatchBook.OpenTrade mine = twoPartyMatchBook.create(inbound, sessionID, product, finraTradeId, controlDate);
+		if (mine == null) {
+			log.info("Two-party match: trade not comparable (need executing MPID, contra MPID, security, qty, price, trade date).");
+			return;
+		}
+		TwoPartyMatchBook.OpenTrade other = twoPartyMatchBook.takeContra(mine);
+		if (other == null) {
+			twoPartyMatchBook.park(mine);
+			log.info("Two-party match: parked {} trade {} ({} side {} vs {}). Waiting for the other gateway.",
+					product, mine.tradeId, mine.executingMpid, mine.executingSide, mine.contraMpid);
+			return;
+		}
+		String matchId = twoPartyMatchBook.allocateMatchId(product, true);
+		sendMatchToBoth(mine, other, matchId, true, sessionID);
+		twoPartyMatchBook.rememberPair(mine, other, matchId);
+		log.info("Two-party match: {} 573=0 22028={} sent to {} and {}.", product, matchId, mine.sessionID, other.sessionID);
+	}
+
+	/** Drops the referenced report. A previously matched counterparty is unmatched on both sessions and left open. */
+	private void releasePriorTrade(TradeCaptureReport inbound, SessionID sessionID, String product)
+			throws InterruptedException {
+		TwoPartyMatchBook.OpenTrade prior = twoPartyMatchBook.findReferenced(inbound);
+		if (prior == null) {
+			log.debug("Two-party match: no open or matched trade for this cancel, reversal, or correction.");
+			return;
+		}
+		TwoPartyMatchBook.OpenTrade other = prior.counterparty;
+		boolean wasMatched = prior.matched && other != null;
+		twoPartyMatchBook.forget(prior);
+		if (other != null) {
+			twoPartyMatchBook.forget(other);
+		}
+		if (wasMatched) {
+			String unmatchId = twoPartyMatchBook.allocateMatchId(product, false);
+			sendMatchToBoth(prior, other, unmatchId, false, sessionID);
+			log.info("Two-party match: {} 573=1 22028={} sent to {} and {}.", product, unmatchId, prior.sessionID,
+					other.sessionID);
+			twoPartyMatchBook.park(other);
+			log.info("Two-party match: {} trade {} is open again after the other side unmatched.", product, other.tradeId);
+		}
+	}
+
+	private void sendMatchToBoth(TwoPartyMatchBook.OpenTrade left, TwoPartyMatchBook.OpenTrade right, String matchId,
+			boolean matched, SessionID delaySession) throws InterruptedException {
+		int delay = matchStatusAckDelaySecsEffective(delaySession);
+		if (delay > 0) {
+			Thread.sleep(delay * 1000L);
+		}
+		sendMatchStatusToParty(left, matchId, matched);
+		sendMatchStatusToParty(right, matchId, matched);
+	}
+
+	private void sendMatchStatusToParty(TwoPartyMatchBook.OpenTrade party, String matchId, boolean matched) {
+		if (party == null || party.sessionID == null || party.inbound == null) {
+			return;
+		}
+		if (!sendMatchStatusAckEffective(party.sessionID)) {
+			return;
+		}
+		try {
+			TradeCaptureReport ma = new TradeCaptureReport();
+			String product = party.product != null ? party.product : "CA";
+			ma.setField(new StringField(1011, product + "MA"));
+			ma.setField(new TradeReportID(getTrdRptID()));
+			if (party.controlDate != null) {
+				ma.setField(new StringField(22011, party.controlDate));
+			} else {
+				ma.setField(new StringField(22011, getControlDate()));
+			}
+			if (party.tradeId != null) {
+				ma.setField(new StringField(1003, party.tradeId));
+			}
+			ma.setField(new StringField(22027, getControlDate()));
+			ma.setField(new StringField(22028, matchId));
+			ma.setField(new TradeReportTransType(3));
+			ma.setField(new IntField(856, 2));
+			ma.setField(new MatchStatus(matched ? '0' : '1'));
+			ma.setField(new PreviouslyReported(false));
+			copyMaSpecFieldsFromInbound(ma, party.inbound);
+			ma.reverseRoute(party.inbound.getHeader());
+			ensureMAHasTwoSidesWithStructure(ma, party.inbound);
+			stripNonMaRootScalars(ma);
+			prepareOutboundAeForWire(ma);
+			Session.sendToTarget(ma, party.sessionID);
+			log.info("Sent Match Status {} to {} (573={}, 1003={}, 22028={}).", product + "MA", party.sessionID,
+					matched ? "0" : "1", party.tradeId, matchId);
+			if (matched && party.clientTradeReportId != null) {
+				matchStatusContextStore.markMatched(party.clientTradeReportId, matchId);
+				try {
+					compliancePipeline.getLifecycleEngine().markMatched(party.clientTradeReportId, party.sessionID);
+				} catch (Exception e) {
+					log.trace("markMatched lifecycle: {}", e.getMessage());
+				}
+			}
+		} catch (Exception e) {
+			log.warn("Two-party match send to {} failed: {}", party.sessionID, e.getMessage(), e);
+		}
+	}
+
+	private static boolean isCorrection(TradeCaptureReport inbound) {
+		try {
+			return inbound.getTradeReportTransType().getValue() == 2;
+		} catch (FieldNotFound e) {
+			return false;
+		}
+	}
+
+	private static boolean isForceUnmatchedPrice(TradeCaptureReport inbound) {
+		try {
+			return inbound.isSetField(31) && inbound.getLastPx().getValue() == 888d;
+		} catch (FieldNotFound e) {
+			return false;
+		}
+	}
+
+	private static String stringField(TradeCaptureReport msg, int tag) {
+		if (msg == null) {
+			return null;
+		}
+		try {
+			if (!msg.isSetField(tag)) {
+				return null;
+			}
+			String v = msg.getField(new StringField(tag)).getValue();
+			if (v == null || v.trim().isEmpty()) {
+				return null;
+			}
+			return v.trim();
+		} catch (FieldNotFound e) {
+			return null;
 		}
 	}
 
