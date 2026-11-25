@@ -43,6 +43,12 @@ public final class TwoPartyMatchBook {
 		public volatile boolean matched;
 		public volatile OpenTrade counterparty;
 		public volatile String matchTradeId;
+		/** FINRA TradeReportID (571) on the entry acknowledgement. */
+		public volatile String finraTradeReportId;
+		/** TradeReportID of the allege sent to the contra gateway. */
+		public volatile String allegeToContraReportId;
+		/** Logged-on session for the contra MPID, when one is configured. */
+		public volatile SessionID contraSessionID;
 
 		OpenTrade(SessionID sessionID, String product, String executingMpid, String contraMpid, char executingSide,
 				String economicsKey, String tradeId, String controlDate, String clientTradeReportId,

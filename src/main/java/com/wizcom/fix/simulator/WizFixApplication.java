@@ -1931,6 +1931,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			removeTagsNotExpectedForEN(resTrdCapRpt);     // strip 939, 22002 for CR
 			applyAePricingEchoAndFinraCaenOrder(reqTrdCapRpt, resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
+			sendContraConfirmationCopy(resTrdCapRpt, inboundSnapshot);
 			String productCr = normalizeProductPrefix(securityType);
 			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productCr);
 			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productCr, resTrdCapRpt, MatchStatusEvent.MATCHED, inboundSnapshot);
@@ -1999,6 +2000,7 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			GatewayAllocQtyEcho.stripRootLevelPricingTags(resTrdCapRpt);
 			reorderAckBodyAfterStrip(resTrdCapRpt);
 			Session.sendToTarget(resTrdCapRpt, sessionID);
+			sendContraConfirmationCopy(resTrdCapRpt, inboundSnapshot);
 			String productCx = normalizeProductPrefix(securityType);
 			matchStatusContextStore.recordFromAck(reqTrdCapRpt, resTrdCapRpt, productCx);
 			maybeSendMatchStatusAck(reqTrdCapRpt, sessionID, productCx, resTrdCapRpt, MatchStatusEvent.UNMATCHED, inboundSnapshot);
@@ -2156,6 +2158,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		String product = productPrefix != null ? productPrefix : "CA";
 		boolean correction = isCorrection(inbound);
 		if (event == MatchStatusEvent.UNMATCHED) {
+			if (isReversal(inbound)) {
+				releaseReversalWithoutUnmatch(inbound);
+				return;
+			}
 			releasePriorTrade(inbound, sessionID, product);
 			return;
 		}
@@ -2176,6 +2182,10 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		if (mine == null) {
 			log.info("Two-party match: trade not comparable (need executing MPID, contra MPID, security, qty, price, trade date).");
 			return;
+		}
+		mine.finraTradeReportId = stringField(ackMsg, 571);
+		if (!correction) {
+			sendAllegeToContra(mine);
 		}
 		TwoPartyMatchBook.OpenTrade other = twoPartyMatchBook.takeContra(mine);
 		if (other == null) {
@@ -2269,6 +2279,150 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 		} catch (Exception e) {
 			log.warn("Two-party match send to {} failed: {}", party.sessionID, e.getMessage(), e);
 		}
+	}
+
+	/** FINRA does not document an Unmatched message for a reversal. Drop the pair and leave the other trade open. */
+	private void releaseReversalWithoutUnmatch(TradeCaptureReport inbound) {
+		TwoPartyMatchBook.OpenTrade prior = twoPartyMatchBook.findReferenced(inbound);
+		if (prior == null) {
+			log.info("Two-party match: reversal has no open or matched trade. No Unmatched message sent.");
+			return;
+		}
+		TwoPartyMatchBook.OpenTrade other = prior.counterparty;
+		twoPartyMatchBook.forget(prior);
+		if (other != null) {
+			twoPartyMatchBook.forget(other);
+			twoPartyMatchBook.park(other);
+		}
+		log.info("Two-party match: reversal of {} does not generate an Unmatched message. Contra trade {} left open.",
+				prior.tradeId, other == null ? "none" : other.tradeId);
+	}
+
+	/** SPAL/CAAL/TSAL to the contra gateway so a later cancel or correction copy has an allege TradeReportID. */
+	private void sendAllegeToContra(TwoPartyMatchBook.OpenTrade trade) {
+		if (trade == null || trade.inbound == null) {
+			return;
+		}
+		SessionID dest = findGatewaySession(trade.contraMpid, trade.product);
+		if (dest == null) {
+			log.info("Allege skipped: no {} session for contra {}.", trade.product, trade.contraMpid);
+			return;
+		}
+		try {
+			TradeCaptureReport allege = (TradeCaptureReport) trade.inbound.clone();
+			String allegeId = getTrdRptID();
+			allege.setField(new StringField(1011, trade.product + "AL"));
+			allege.setField(new TradeReportID(allegeId));
+			try {
+				allege.removeField(572);
+			} catch (Exception ignored) {
+			}
+			try {
+				allege.removeField(58);
+			} catch (Exception ignored) {
+			}
+			if (trade.tradeId != null) {
+				allege.setField(new StringField(1003, trade.tradeId));
+			}
+			if (trade.controlDate != null) {
+				allege.setField(new StringField(22011, trade.controlDate));
+			}
+			routeToSession(allege, dest);
+			prepareOutboundAeForWire(allege);
+			Session.sendToTarget(allege, dest);
+			trade.contraSessionID = dest;
+			trade.allegeToContraReportId = allegeId;
+			log.info("Sent {} to {} (571={}).", trade.product + "AL", dest, allegeId);
+		} catch (Exception e) {
+			log.warn("Allege to {} failed: {}", trade.contraMpid, e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * Cancel and correction confirmations are also sent to the contra.
+	 * Tag 572 on that copy is the TradeReportID from the allege previously sent to them.
+	 */
+	private void sendContraConfirmationCopy(TradeCaptureReport reporterAck, TradeCaptureReport inboundSnapshot) {
+		if (!twoPartyMatchEnabled() || reporterAck == null || inboundSnapshot == null) {
+			return;
+		}
+		try {
+			TwoPartyMatchBook.OpenTrade prior = twoPartyMatchBook.findReferenced(inboundSnapshot);
+			if (prior == null) {
+				log.info("Contra confirmation copy skipped: original trade was not found.");
+				return;
+			}
+			SessionID dest = prior.contraSessionID;
+			if (dest == null && prior.counterparty != null) {
+				dest = prior.counterparty.sessionID;
+			}
+			if (dest == null) {
+				dest = findGatewaySession(prior.contraMpid, prior.product);
+			}
+			if (dest == null) {
+				log.info("Contra confirmation copy skipped: no session for {}.", prior.contraMpid);
+				return;
+			}
+			TradeCaptureReport copy = (TradeCaptureReport) reporterAck.clone();
+			String ref = prior.allegeToContraReportId;
+			if (ref == null && prior.counterparty != null && prior.counterparty.finraTradeReportId != null) {
+				ref = prior.counterparty.finraTradeReportId;
+			}
+			if (ref != null) {
+				copy.setField(new TradeReportRefID(ref));
+			}
+			try {
+				copy.removeField(58);
+			} catch (Exception ignored) {
+			}
+			routeToSession(copy, dest);
+			prepareOutboundAeForWire(copy);
+			Session.sendToTarget(copy, dest);
+			log.info("Sent contra copy of {} to {} (572={}).", stringField(copy, 1011), dest, ref);
+		} catch (Exception e) {
+			log.warn("Contra confirmation copy failed: {}", e.getMessage(), e);
+		}
+	}
+
+	private SessionID findGatewaySession(String mpid, String product) {
+		if (settings == null || mpid == null || product == null) {
+			return null;
+		}
+		try {
+			Iterator<SessionID> it = settings.sectionIterator();
+			while (it.hasNext()) {
+				SessionID id = it.next();
+				if (mpid.equalsIgnoreCase(id.getTargetCompID()) && product.equalsIgnoreCase(id.getSenderSubID())) {
+					return id;
+				}
+			}
+		} catch (Exception e) {
+			log.trace("findGatewaySession: {}", e.getMessage());
+		}
+		return null;
+	}
+
+	private void routeToSession(TradeCaptureReport msg, SessionID dest) {
+		msg.getHeader().setField(new BeginString(dest.getBeginString()));
+		msg.getHeader().setField(new SenderCompID(dest.getSenderCompID()));
+		msg.getHeader().setField(new TargetCompID(dest.getTargetCompID()));
+		if (dest.getSenderSubID() != null && !dest.getSenderSubID().isEmpty()) {
+			msg.getHeader().setField(new SenderSubID(dest.getSenderSubID()));
+		}
+		if (dest.getTargetSubID() != null && !dest.getTargetSubID().isEmpty()) {
+			msg.getHeader().setField(new TargetSubID(dest.getTargetSubID()));
+		}
+		msg.getHeader().setField(new MsgType(MsgType.TRADE_CAPTURE_REPORT));
+	}
+
+	private static boolean isReversal(TradeCaptureReport inbound) {
+		try {
+			if (inbound.getTradeReportTransType().getValue() == 4) {
+				return true;
+			}
+		} catch (FieldNotFound ignored) {
+		}
+		return inbound.isSetField(22009);
 	}
 
 	private static boolean isCorrection(TradeCaptureReport inbound) {
