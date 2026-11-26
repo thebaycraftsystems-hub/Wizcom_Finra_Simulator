@@ -621,15 +621,30 @@ public class Simulator {
     }
     
     /**
-     * Forces UseDataDictionary=N for every section so the engine never rejects a message
-     * with "Required tag missing" for any field. All messages are passed to the app and
-     * get a business response (primary and secondary, and when using an external config).
-     * SessionSettings.sectionIterator() excludes the [DEFAULT] section, so we must set
-     * it explicitly; otherwise sessions inherit UseDataDictionary=Y from default.
+     * When [default] UseDataDictionary=N, force N on every section so the engine never rejects a message
+     * with "Required tag missing". SessionSettings.sectionIterator() excludes [DEFAULT], so set it explicitly.
+     * When [default] is Y (secondary two-gateway match), keep the dictionary so repeating NoSides groups are
+     * parsed, and turn incoming validation off so missing or out-of-order tags are still accepted.
      */
     private static void forceNoRequiredTagReject(SessionSettings settings) {
         try {
             SessionID defaultSection = new SessionID("DEFAULT", "", "");
+            boolean keepDictionary = false;
+            try {
+                if (settings.isSetting(defaultSection, "UseDataDictionary")) {
+                    keepDictionary = "Y".equalsIgnoreCase(settings.getString(defaultSection, "UseDataDictionary").trim());
+                }
+            } catch (Exception ignored) {
+            }
+            if (keepDictionary) {
+                settings.setString(defaultSection, "ValidateIncomingMessage", "N");
+                settings.setString(defaultSection, "ValidateFieldsOutOfOrder", "N");
+                settings.setString(defaultSection, "ValidateUnorderedGroupFields", "N");
+                settings.setString(defaultSection, "ValidateUserDefinedFields", "N");
+                settings.setString(defaultSection, "AllowUnknownMsgFields", "Y");
+                log.info("UseDataDictionary=Y kept so NoSides groups are parsed for match. Incoming validation stays off.");
+                return;
+            }
             settings.setString(defaultSection, "UseDataDictionary", "N");
             Iterator<SessionID> it = settings.sectionIterator();
             while (it.hasNext()) {
