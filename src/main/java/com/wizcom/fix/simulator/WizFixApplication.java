@@ -2546,19 +2546,8 @@ public class WizFixApplication extends MessageCracker implements quickfix.Applic
 			}
 			securityId = securityId.trim();
 
-			String idSource = null;
-			try {
-				if (inbound.isSetField(22)) {
-					idSource = inbound.getField(new StringField(22)).getValue();
-				}
-			} catch (Exception ignored) {
-			}
-			boolean gatewaySentSymbol = idSource != null
-					&& (FinraSecurityIDSource.SYMBOL.equals(idSource.trim())
-							|| SecurityIDSource.EXCHANGE_SYMBOL.equals(idSource.trim()));
-
-			// Gateway Symbol (22=8) → MA CUSIP 48=MATCH-CUS; Gateway CUSIP (22=1) → echo same 48.
-			String cusipOnWire = gatewaySentSymbol ? "MATCH-CUS" : securityId;
+			// Echo inbound SecurityID (48) on SPMA/CAMA/TSMA — same value Gateway sent on the trade request.
+			String cusipOnWire = securityId;
 
 			String altId = null;
 			try {
