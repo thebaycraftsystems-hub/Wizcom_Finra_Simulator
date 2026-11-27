@@ -9,8 +9,7 @@ Developers must use the **GitHub** remote, not the internal Gitea URL in some lo
 | Organization | `thebaycraftsystems-hub` |
 | Repository name | **`Wizcom_Finra_Simulator`** (not `fix-simulator`) |
 | Web URL | https://github.com/thebaycraftsystems-hub/Wizcom_Finra_Simulator |
-| Default branch | `main` |
-| Active development branch | `V2-CurssorUpdate` |
+| Default / active branch | `main` |
 
 ## Clone (read access)
 
@@ -19,19 +18,6 @@ Public read access is available without a token:
 ```bash
 git clone https://github.com/thebaycraftsystems-hub/Wizcom_Finra_Simulator.git
 cd Wizcom_Finra_Simulator
-```
-
-To work on the current feature branch:
-
-```bash
-git fetch origin
-git checkout V2-CurssorUpdate
-```
-
-Or in one step:
-
-```bash
-git clone -b V2-CurssorUpdate https://github.com/thebaycraftsystems-hub/Wizcom_Finra_Simulator.git
 ```
 
 ## Push access (write)
@@ -44,7 +30,7 @@ Pushing requires:
 
 ```bash
 git remote add github https://github.com/thebaycraftsystems-hub/Wizcom_Finra_Simulator.git
-git push github your-branch-name
+git push github main
 ```
 
 An org admin must invite users: **GitHub → Organization → People → Invite member**, or **Repo → Settings → Collaborators**.
@@ -78,7 +64,6 @@ git fetch github
 | Permission denied (push) | Not a collaborator | Org admin adds user or team |
 | SSO authorization failed | Enterprise SAML | Open GitHub → authorize SSO for the org |
 | Timeout to `192.168.1.66` | Using `origin` off VPN | Use GitHub HTTPS URL |
-| Empty / old `main` | Work is on `V2-CurssorUpdate` | `git checkout V2-CurssorUpdate` |
 
 ## Build after clone
 
@@ -99,4 +84,4 @@ Config: copy or edit `quickfixj-server.cfg` in the run directory (see `src/main/
 
 ---
 
-*Verified: `git ls-remote` to GitHub succeeds for `main` and `V2-CurssorUpdate` (2026-05-22).*
+*Verified: `git ls-remote` to GitHub succeeds for `main`.*
